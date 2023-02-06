@@ -123,7 +123,7 @@ impl NetworkBehaviour for Behaviour {
             return Poll::Ready(event);
         }
 
-        if self.disabled {
+        if !self.disabled {
             let lids = self.futures.keys().copied().collect::<Vec<_>>();
 
             for id in lids {
