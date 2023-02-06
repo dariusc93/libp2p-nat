@@ -1,0 +1,33 @@
+[package]
+name = "libp2p-nat"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "(WIP) Implementation of port forwarding for libp2p"
+repository = "https://github.com/dariusc93/libp2p-nat"
+readme = "README.md"
+keywords = ["libp2p", "p2p", "networking"]
+authors = ["Darius Clark"]
+exclude = [".gitignore"]
+
+[features]
+default = ["tokio"]
+tokio = ["dep:tokio", "igd-next/aio_tokio", "natpmp/tokio"]
+async-std = ["dep:async-std", "igd-next/aio_async_std", "natpmp/async-std"]
+
+[dependencies]
+libp2p = { version = "0.50" }
+futures = "0.3"
+natpmp = { version = "0.4", default-features = false }
+igd-next = { version = "0.13", default-features = false }
+void = "1"
+tokio = { version = "1", optional = true, features = ["full"] }
+async-std = { version = "1", optional = true }
+log = "0.4"
+anyhow = "1"
+wasm-timer = "0.2"
+
+[dev-dependencies]
+libp2p = { version = "0.50", features = ["full"] }
+clap = { version = "4.1", features = ["derive"] }
+env_logger = "0.10"
