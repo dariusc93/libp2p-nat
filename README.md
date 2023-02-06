@@ -1,6 +1,10 @@
 # libp2p-nat
 
-(WIP) Implementation of port forwarding for libp2p
+(WIP) Implementation of port forwarding for libp2p.
+
+## Note
+
+If the firewall, router, and/or network blocks or does not support UPnP/IGD or NAT-PMP, this behaviour will not work. 
 
 ## License
 
