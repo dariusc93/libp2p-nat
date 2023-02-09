@@ -38,7 +38,13 @@ pub struct Behaviour {
 
 impl Behaviour {
     pub async fn new() -> anyhow::Result<Self> {
-        let duration = Duration::from_secs(2 * 60);
+        Self::with_duration(Duration::from_secs(2 * 60)).await
+    }
+
+    pub async fn with_duration(duration: Duration) -> anyhow::Result<Self> {
+        if duration.as_secs() < 60 {
+            anyhow::bail!("Duration must be 60 seconds or more");
+        }
         let renewal = duration / 2;
         let nat_sender = task::port_forwarding_task().await?;
         Ok(Self {
