@@ -96,6 +96,7 @@ impl Behaviour {
 
     /// Gets external address
     /// Note: This uses nat-pmp for fetching external address at this time.
+    #[cfg(any(feature = "tokio", feature = "async-std"))]
     pub async fn external_addr(&self) -> anyhow::Result<IpAddr> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -103,6 +104,18 @@ impl Behaviour {
             .clone()
             .unbounded_send(NatCommands::NatpmpExternalAddr(tx));
         rx.await?
+    }
+
+    /// Gets external address
+    /// Note: This uses nat-pmp for fetching external address at this time.
+    #[cfg(not(any(feature = "tokio", feature = "async-std")))]
+    pub fn external_addr(&self) -> anyhow::Result<IpAddr> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .nat_sender
+            .clone()
+            .unbounded_send(NatCommands::NatpmpExternalAddr(tx));
+        futures::executor::block_on(rx)?
     }
 }
 

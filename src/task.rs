@@ -266,6 +266,7 @@ pub fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
                         let _ = res.send(Err(anyhow::Error::from(e)));
                         continue;
                     }
+                    std::thread::sleep(Duration::from_millis(100));
                     match handler.read_response_or_retry() {
                         Ok(natpmp::Response::Gateway(gr)) => {
                             let addr = IpAddr::V4(*gr.public_address());
