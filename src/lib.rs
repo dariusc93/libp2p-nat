@@ -4,6 +4,7 @@ mod utils;
 use core::task::{Context, Poll};
 use futures::channel::oneshot::{self, Canceled};
 use futures::future::BoxFuture;
+use futures::stream::FuturesOrdered;
 use futures::{FutureExt, StreamExt};
 use libp2p::core::transport::ListenerId;
 use libp2p::core::Multiaddr;
@@ -18,7 +19,7 @@ use std::time::Duration;
 use task::NatCommands;
 use wasm_timer::Interval;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, HashSet};
 
 type NetworkBehaviourAction = swarm::NetworkBehaviourAction<
     <<Behaviour as NetworkBehaviour>::ConnectionHandler as ConnectionHandler>::OutEvent,
@@ -29,10 +30,10 @@ type NetworkBehaviourAction = swarm::NetworkBehaviourAction<
 pub struct Behaviour {
     events: VecDeque<NetworkBehaviourAction>,
     nat_sender: futures::channel::mpsc::UnboundedSender<NatCommands>,
-    futures: HashMap<ListenerId, Vec<BoxFuture<'static, Result<anyhow::Result<()>, Canceled>>>>,
+    futures: HashMap<ListenerId, FuturesOrdered<BoxFuture<'static, Result<anyhow::Result<()>, Canceled>>>>,
     duration: Duration,
     renewal_interval: Interval,
-    local_listeners: HashMap<ListenerId, Vec<Multiaddr>>,
+    local_listeners: HashMap<ListenerId, HashSet<Multiaddr>>,
     disabled: bool,
 }
 
@@ -133,7 +134,7 @@ impl NetworkBehaviour for Behaviour {
             self.local_listeners
                 .entry(id)
                 .or_default()
-                .push(addr.clone());
+                .insert(addr.clone());
 
             let (tx, rx) = oneshot::channel();
 
@@ -142,16 +143,14 @@ impl NetworkBehaviour for Behaviour {
                 .clone()
                 .unbounded_send(NatCommands::ForwardPort(addr.clone(), self.duration, tx));
 
-            self.futures.entry(id).or_default().push(rx.boxed())
+            self.futures.entry(id).or_default().push_back(rx.boxed())
         }
     }
 
     fn inject_expired_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
         if let Entry::Occupied(mut entry) = self.local_listeners.entry(id) {
             let list = entry.get_mut();
-            if let Some(index) = list.iter().position(|inner_addr| inner_addr == addr) {
-                list.remove(index);
-            }
+            list.remove(addr);
             if list.is_empty() {
                 entry.remove();
             }
@@ -172,31 +171,28 @@ impl NetworkBehaviour for Behaviour {
 
             for id in lids {
                 if let Entry::Occupied(mut entry) = self.futures.entry(id) {
-                    let mut for_removal = vec![];
-                    for (index, fut) in entry.get_mut().iter_mut().enumerate() {
-                        match Pin::new(fut).poll_unpin(cx) {
-                            Poll::Ready(result) => {
-                                for_removal.push(index);
-                                match result {
-                                    Ok(Ok(_)) => {
-                                        log::debug!("Successful with port forwarding");
-                                    }
-                                    Ok(Err(e)) => {
-                                        log::error!("Error attempting to port forward: {e}");
-                                    }
-                                    Err(_) => {
-                                        log::error!("Channel has dropped");
-                                    }
+                    let list = entry.get_mut();
+                    
+                    match Pin::new(list).poll_next_unpin(cx) {
+                        Poll::Ready(Some(result)) => {
+                            match result {
+                                Ok(Ok(_)) => {
+                                    log::debug!("Successful with port forwarding");
+                                }
+                                Ok(Err(e)) => {
+                                    log::error!("Error attempting to port forward: {e}");
+                                }
+                                Err(_) => {
+                                    log::error!("Channel has dropped");
                                 }
                             }
-                            Poll::Pending => continue,
-                        }
+                        },
+                        Poll::Ready(None) => continue,
+                        Poll::Pending => continue,
                     }
-                    for index in for_removal {
-                        entry.get_mut().remove(index);
-                    }
+
                     if entry.get().is_empty() {
-                        entry.remove();
+                        let _ = entry.remove();
                     }
                 }
             }
@@ -214,7 +210,7 @@ impl NetworkBehaviour for Behaviour {
                                 tx,
                             ));
 
-                        self.futures.entry(*id).or_default().push(rx.boxed())
+                        self.futures.entry(*id).or_default().push_back(rx.boxed())
                     }
                 }
             }
