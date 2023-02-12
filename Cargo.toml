@@ -1,6 +1,6 @@
 [package]
 name = "libp2p-nat"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "(WIP) Implementation of port forwarding for libp2p"
