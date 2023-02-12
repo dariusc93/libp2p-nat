@@ -221,6 +221,7 @@ pub fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
                         let _ = res.send(Err(anyhow::Error::from(e)));
                         continue;
                     }
+                    std::thread::sleep(Duration::from_millis(100));
                     match nat_handle.read_response_or_retry() {
                         Ok(natpmp::Response::TCP(_)) | Ok(natpmp::Response::UDP(_)) => {
                             let _ = res.send(Ok(()));
