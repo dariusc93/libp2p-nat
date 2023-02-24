@@ -1,11 +1,10 @@
 use std::{io, str::FromStr, time::Duration};
 
 use clap::Parser;
-use futures::StreamExt;
+use futures::{future::Either, StreamExt};
 use libp2p::{
     autonat::Behaviour as Autonat,
     core::{
-        either::EitherOutput,
         muxing::StreamMuxerBox,
         transport::{timeout::TransportTimeout, Boxed, OrTransport},
         upgrade::{SelectUpgrade, Version},
@@ -19,7 +18,8 @@ use libp2p::{
     ping::Behaviour as Ping,
     quic::async_std::Transport as AsyncQuicTransport,
     quic::Config as QuicConfig,
-    relay::v2::client::{transport::ClientTransport, Client as RelayClient},
+    relay::client::Transport as ClientTransport,
+    relay::client::{self, Behaviour as RelayClient},
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmBuilder, SwarmEvent},
     tcp::{async_io::Transport as AsyncTcpTransport, Config as GenTcpConfig},
     yamux::YamuxConfig,
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Local Node: {local_peer_id}");
 
-    let (relay_transport, relay_client) = RelayClient::new_transport_and_behaviour(local_peer_id);
+    let (relay_transport, relay_client) = client::new(local_peer_id);
 
     let transport = build_transport(local_keypair.clone(), relay_transport)?;
 
@@ -193,8 +193,8 @@ pub fn build_transport(
 
     let transport = OrTransport::new(quic_transport, transport)
         .map(|either_output, _| match either_output {
-            EitherOutput::First((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-            EitherOutput::Second((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
+            Either::Left((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
+            Either::Right((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
         })
         .boxed();
 

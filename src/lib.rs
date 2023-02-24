@@ -8,10 +8,10 @@ use futures::stream::FuturesOrdered;
 use futures::{FutureExt, StreamExt};
 use libp2p::core::transport::ListenerId;
 use libp2p::core::Multiaddr;
-use libp2p::swarm::ConnectionHandler;
 use libp2p::swarm::{
     self, dummy::ConnectionHandler as DummyConnectionHandler, NetworkBehaviour, PollParameters,
 };
+use libp2p::swarm::{ExpiredListenAddr, NewListenAddr, THandlerInEvent};
 use std::collections::hash_map::Entry;
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -19,18 +19,16 @@ use std::time::Duration;
 use task::NatCommands;
 use wasm_timer::Interval;
 
-use std::collections::{HashMap, VecDeque, HashSet};
-
-type NetworkBehaviourAction = swarm::NetworkBehaviourAction<
-    <<Behaviour as NetworkBehaviour>::ConnectionHandler as ConnectionHandler>::OutEvent,
-    <Behaviour as NetworkBehaviour>::ConnectionHandler,
->;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[allow(clippy::type_complexity)]
 pub struct Behaviour {
-    events: VecDeque<NetworkBehaviourAction>,
+    events: VecDeque<swarm::NetworkBehaviourAction<<Self as NetworkBehaviour>::OutEvent, THandlerInEvent<Self>>>,
     nat_sender: futures::channel::mpsc::UnboundedSender<NatCommands>,
-    futures: HashMap<ListenerId, FuturesOrdered<BoxFuture<'static, Result<anyhow::Result<()>, Canceled>>>>,
+    futures: HashMap<
+        ListenerId,
+        FuturesOrdered<BoxFuture<'static, Result<anyhow::Result<()>, Canceled>>>,
+    >,
     duration: Duration,
     renewal_interval: Interval,
     local_listeners: HashMap<ListenerId, HashSet<Multiaddr>>,
@@ -128,32 +126,47 @@ impl NetworkBehaviour for Behaviour {
         DummyConnectionHandler
     }
 
-    fn inject_new_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
-        // Used to make sure we only obtain private ips
-        if let Some((_, _)) = utils::multiaddr_to_socket_port(addr) {
-            self.local_listeners
-                .entry(id)
-                .or_default()
-                .insert(addr.clone());
-
-            let (tx, rx) = oneshot::channel();
-
-            let _ = self
-                .nat_sender
-                .clone()
-                .unbounded_send(NatCommands::ForwardPort(addr.clone(), self.duration, tx));
-
-            self.futures.entry(id).or_default().push_back(rx.boxed())
-        }
+    fn on_connection_handler_event(
+        &mut self,
+        _peer_id: libp2p::PeerId,
+        _connection_id: swarm::ConnectionId,
+        _event: swarm::THandlerOutEvent<Self>,
+    ) {
     }
 
-    fn inject_expired_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
-        if let Entry::Occupied(mut entry) = self.local_listeners.entry(id) {
-            let list = entry.get_mut();
-            list.remove(addr);
-            if list.is_empty() {
-                entry.remove();
+    fn on_swarm_event(&mut self, event: swarm::FromSwarm<Self::ConnectionHandler>) {
+        match event {
+            swarm::FromSwarm::NewListenAddr(NewListenAddr { listener_id, addr }) => {
+                // Used to make sure we only obtain private ips
+                if let Some((_, _)) = utils::multiaddr_to_socket_port(addr) {
+                    self.local_listeners
+                        .entry(listener_id)
+                        .or_default()
+                        .insert(addr.clone());
+
+                    let (tx, rx) = oneshot::channel();
+
+                    let _ = self
+                        .nat_sender
+                        .clone()
+                        .unbounded_send(NatCommands::ForwardPort(addr.clone(), self.duration, tx));
+
+                    self.futures
+                        .entry(listener_id)
+                        .or_default()
+                        .push_back(rx.boxed())
+                }
             }
+            swarm::FromSwarm::ExpiredListenAddr(ExpiredListenAddr { listener_id, addr }) => {
+                if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id) {
+                    let list = entry.get_mut();
+                    list.remove(addr);
+                    if list.is_empty() {
+                        entry.remove();
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -161,7 +174,7 @@ impl NetworkBehaviour for Behaviour {
         &mut self,
         cx: &mut Context,
         _: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction> {
+    ) -> Poll<swarm::NetworkBehaviourAction<Self::OutEvent, THandlerInEvent<Self>>> {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(event);
         }
