@@ -122,10 +122,6 @@ impl NetworkBehaviour for Behaviour {
     type ConnectionHandler = DummyConnectionHandler;
     type OutEvent = void::Void;
 
-    fn new_handler(&mut self) -> Self::ConnectionHandler {
-        DummyConnectionHandler
-    }
-
     fn on_connection_handler_event(
         &mut self,
         _peer_id: libp2p::PeerId,
