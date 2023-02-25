@@ -7,11 +7,14 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesOrdered;
 use futures::{FutureExt, StreamExt};
 use libp2p::core::transport::ListenerId;
-use libp2p::core::Multiaddr;
+use libp2p::core::{Endpoint, Multiaddr};
 use libp2p::swarm::{
     self, dummy::ConnectionHandler as DummyConnectionHandler, NetworkBehaviour, PollParameters,
 };
-use libp2p::swarm::{ExpiredListenAddr, NewListenAddr, THandlerInEvent};
+use libp2p::swarm::{
+    ConnectionDenied, ConnectionId, ExpiredListenAddr, NewListenAddr, THandler, THandlerInEvent,
+};
+use libp2p::PeerId;
 use std::collections::hash_map::Entry;
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -23,7 +26,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 #[allow(clippy::type_complexity)]
 pub struct Behaviour {
-    events: VecDeque<swarm::NetworkBehaviourAction<<Self as NetworkBehaviour>::OutEvent, THandlerInEvent<Self>>>,
+    events: VecDeque<
+        swarm::NetworkBehaviourAction<<Self as NetworkBehaviour>::OutEvent, THandlerInEvent<Self>>,
+    >,
     nat_sender: futures::channel::mpsc::UnboundedSender<NatCommands>,
     futures: HashMap<
         ListenerId,
@@ -122,11 +127,31 @@ impl NetworkBehaviour for Behaviour {
     type ConnectionHandler = DummyConnectionHandler;
     type OutEvent = void::Void;
 
+    fn handle_established_inbound_connection(
+        &mut self,
+        _: ConnectionId,
+        _: PeerId,
+        _: &Multiaddr,
+        _: &Multiaddr,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        Ok(DummyConnectionHandler)
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        _: ConnectionId,
+        _: PeerId,
+        _: &Multiaddr,
+        _: Endpoint,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        Ok(DummyConnectionHandler)
+    }
+
     fn on_connection_handler_event(
         &mut self,
-        _peer_id: libp2p::PeerId,
-        _connection_id: swarm::ConnectionId,
-        _event: swarm::THandlerOutEvent<Self>,
+        _: libp2p::PeerId,
+        _: swarm::ConnectionId,
+        _: swarm::THandlerOutEvent<Self>,
     ) {
     }
 
@@ -181,19 +206,17 @@ impl NetworkBehaviour for Behaviour {
             for id in lids {
                 if let Entry::Occupied(mut entry) = self.futures.entry(id) {
                     let list = entry.get_mut();
-                    
+
                     match Pin::new(list).poll_next_unpin(cx) {
-                        Poll::Ready(Some(result)) => {
-                            match result {
-                                Ok(Ok(_)) => {
-                                    log::debug!("Successful with port forwarding");
-                                }
-                                Ok(Err(e)) => {
-                                    log::error!("Error attempting to port forward: {e}");
-                                }
-                                Err(_) => {
-                                    log::error!("Channel has dropped");
-                                }
+                        Poll::Ready(Some(result)) => match result {
+                            Ok(Ok(_)) => {
+                                log::debug!("Successful with port forwarding");
+                            }
+                            Ok(Err(e)) => {
+                                log::error!("Error attempting to port forward: {e}");
+                            }
+                            Err(_) => {
+                                log::error!("Channel has dropped");
                             }
                         },
                         Poll::Ready(None) => continue,
