@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 #[allow(clippy::type_complexity)]
 pub struct Behaviour {
     events: VecDeque<
-        swarm::NetworkBehaviourAction<<Self as NetworkBehaviour>::OutEvent, THandlerInEvent<Self>>,
+        swarm::ToSwarm<<Self as NetworkBehaviour>::OutEvent, THandlerInEvent<Self>>,
     >,
     nat_sender: futures::channel::mpsc::UnboundedSender<NatCommands>,
     futures: HashMap<
@@ -195,7 +195,7 @@ impl NetworkBehaviour for Behaviour {
         &mut self,
         cx: &mut Context,
         _: &mut impl PollParameters,
-    ) -> Poll<swarm::NetworkBehaviourAction<Self::OutEvent, THandlerInEvent<Self>>> {
+    ) -> Poll<swarm::ToSwarm<Self::OutEvent, THandlerInEvent<Self>>> {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(event);
         }
