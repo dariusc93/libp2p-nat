@@ -14,7 +14,7 @@ use libp2p::{
     identity::{self, Keypair},
     kad::{store::MemoryStore, Kademlia},
     mplex::MplexConfig,
-    noise::{self, NoiseConfig},
+    noise::{self},
     ping::Behaviour as Ping,
     quic::async_std::Transport as AsyncQuicTransport,
     quic::Config as QuicConfig,
@@ -22,7 +22,7 @@ use libp2p::{
     relay::client::{self, Behaviour as RelayClient},
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmBuilder, SwarmEvent},
     tcp::{async_io::Transport as AsyncTcpTransport, Config as GenTcpConfig},
-    yamux::YamuxConfig,
+    yamux::Config as YamuxConfig,
     Multiaddr, PeerId, Transport,
 };
 
@@ -163,10 +163,7 @@ pub fn build_transport(
     keypair: Keypair,
     relay: ClientTransport,
 ) -> io::Result<Boxed<(PeerId, StreamMuxerBox)>> {
-    let xx_keypair = noise::Keypair::<noise::X25519Spec>::new()
-        .into_authentic(&keypair)
-        .unwrap();
-    let noise_config = NoiseConfig::xx(xx_keypair).into_authenticated();
+    let noise_config = noise::Config::new(&keypair).unwrap();
 
     let multiplex_upgrade = SelectUpgrade::new(YamuxConfig::default(), MplexConfig::new());
 
@@ -205,7 +202,7 @@ fn generate_ed25519(secret_key_seed: u8) -> identity::Keypair {
     let mut bytes = [0u8; 32];
     bytes[0] = secret_key_seed;
 
-    let secret_key = identity::ed25519::SecretKey::from_bytes(&mut bytes)
+    let secret_key = identity::ed25519::SecretKey::try_from_bytes(&mut bytes)
         .expect("this returns `Err` only if the length is wrong; the length is correct; qed");
     identity::Keypair::Ed25519(secret_key.into())
 }

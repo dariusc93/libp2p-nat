@@ -22,6 +22,7 @@ use crate::utils::multiaddr_to_socket_port;
 pub enum NatCommands {
     ForwardPort(Multiaddr, Duration, oneshot::Sender<anyhow::Result<()>>),
     IdgExternalAddr(oneshot::Sender<anyhow::Result<IpAddr>>),
+    #[cfg(not(target_os = "ios"))]
     NatpmpExternalAddr(oneshot::Sender<anyhow::Result<IpAddr>>),
 }
 
@@ -30,9 +31,11 @@ pub enum NatCommands {
 pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
     let (tx, mut rx) = unbounded();
     #[cfg(feature = "tokio")]
+    #[cfg(not(target_os = "ios"))]
     let nat_handle = std::sync::Arc::new(natpmp::new_tokio_natpmp().await?);
 
     #[cfg(feature = "async-std")]
+    #[cfg(not(target_os = "ios"))]
     let nat_handle = std::sync::Arc::new(natpmp::new_async_std_natpmp().await?);
 
     let fut = async move {
@@ -74,29 +77,38 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                         }
                     };
 
-                    // In case igd fails, we will attempt with nat-pmp before returning an error
-                    // TODO: Determine if we should have it in separate events
-                    if let Err(e) = nat_handle
-                        .send_port_mapping_request(
-                            protocol.into(),
-                            addr.port(),
-                            addr.port(),
-                            duration.as_secs() as _,
-                        )
-                        .await
+                    #[cfg(target_os = "ios")]
                     {
-                        let _ = res.send(Err(anyhow::Error::from(e)));
+                        let _ = res.send(Err(anyhow::anyhow!("Unable to port forward")));
                         continue;
                     }
-                    match nat_handle.read_response_or_retry().await {
-                        Ok(natpmp::Response::TCP(_)) | Ok(natpmp::Response::UDP(_)) => {
-                            let _ = res.send(Ok(()));
+
+                    #[cfg(not(target_os = "ios"))]
+                    {
+                        // In case igd fails, we will attempt with nat-pmp before returning an error
+                        // TODO: Determine if we should have it in separate events
+                        if let Err(e) = nat_handle
+                            .send_port_mapping_request(
+                                protocol.into(),
+                                addr.port(),
+                                addr.port(),
+                                duration.as_secs() as _,
+                            )
+                            .await
+                        {
+                            let _ = res.send(Err(anyhow::Error::from(e)));
+                            continue;
                         }
-                        Ok(_) => {
-                            let _ = res.send(Err(anyhow::anyhow!("Unsupported result")));
-                        }
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::anyhow!("Error with nat pmp: {e}")));
+                        match nat_handle.read_response_or_retry().await {
+                            Ok(natpmp::Response::TCP(_)) | Ok(natpmp::Response::UDP(_)) => {
+                                let _ = res.send(Ok(()));
+                            }
+                            Ok(_) => {
+                                let _ = res.send(Err(anyhow::anyhow!("Unsupported result")));
+                            }
+                            Err(e) => {
+                                let _ = res.send(Err(anyhow::anyhow!("Error with nat pmp: {e}")));
+                            }
                         }
                     }
                 }
@@ -117,6 +129,7 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                         }
                     };
                 }
+                #[cfg(not(target_os = "ios"))]
                 NatCommands::NatpmpExternalAddr(res) => {
                     //Note: Because the function contains a mutable reference, we cannot call it behind an arc. So we create
                     //      a new instance until dep is patched upstream
@@ -174,6 +187,7 @@ pub fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
     let (tx, mut rx) = unbounded();
 
     std::thread::spawn(move || {
+        #[cfg(not(target_os = "ios"))]
         let mut nat_handle = natpmp::Natpmp::new().expect("Unable to use natpmp");
         while let Some(cmd) = futures::executor::block_on(rx.next()) {
             match cmd {
@@ -210,27 +224,36 @@ pub fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
                         }
                     };
 
-                    // In case igd fails, we will attempt with nat-pmp before returning an error
-                    // TODO: Determine if we should have it in separate events
-                    if let Err(e) = nat_handle.send_port_mapping_request(
-                        protocol.into(),
-                        addr.port(),
-                        addr.port(),
-                        duration.as_secs() as _,
-                    ) {
-                        let _ = res.send(Err(anyhow::Error::from(e)));
+                    #[cfg(target_os = "ios")]
+                    {
+                        let _ = res.send(Err(anyhow::anyhow!("Unable to port forward")));
                         continue;
                     }
-                    std::thread::sleep(Duration::from_millis(100));
-                    match nat_handle.read_response_or_retry() {
-                        Ok(natpmp::Response::TCP(_)) | Ok(natpmp::Response::UDP(_)) => {
-                            let _ = res.send(Ok(()));
+
+                    #[cfg(not(target_os = "ios"))]
+                    {
+                        // In case igd fails, we will attempt with nat-pmp before returning an error
+                        // TODO: Determine if we should have it in separate events
+                        if let Err(e) = nat_handle.send_port_mapping_request(
+                            protocol.into(),
+                            addr.port(),
+                            addr.port(),
+                            duration.as_secs() as _,
+                        ) {
+                            let _ = res.send(Err(anyhow::Error::from(e)));
+                            continue;
                         }
-                        Ok(_) => {
-                            let _ = res.send(Err(anyhow::anyhow!("Unsupported result")));
-                        }
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::anyhow!("Error with nat pmp: {e}")));
+                        std::thread::sleep(Duration::from_millis(100));
+                        match nat_handle.read_response_or_retry() {
+                            Ok(natpmp::Response::TCP(_)) | Ok(natpmp::Response::UDP(_)) => {
+                                let _ = res.send(Ok(()));
+                            }
+                            Ok(_) => {
+                                let _ = res.send(Err(anyhow::anyhow!("Unsupported result")));
+                            }
+                            Err(e) => {
+                                let _ = res.send(Err(anyhow::anyhow!("Error with nat pmp: {e}")));
+                            }
                         }
                     }
                 }
@@ -251,6 +274,7 @@ pub fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
                         }
                     };
                 }
+                #[cfg(not(target_os = "ios"))]
                 NatCommands::NatpmpExternalAddr(res) => {
                     //Note: Because the function contains a mutable reference, we cannot call it behind an arc. So we create
                     //      a new instance until dep is patched upstream
