@@ -7,17 +7,14 @@ use libp2p::{
     core::{
         muxing::StreamMuxerBox,
         transport::{timeout::TransportTimeout, Boxed, OrTransport},
-        upgrade::{SelectUpgrade, Version},
+        upgrade::Version,
     },
     dns::{DnsConfig, ResolverConfig},
     identify::{self, Behaviour as Identify, Info},
     identity::{self, Keypair},
     kad::{store::MemoryStore, Kademlia},
-    mplex::MplexConfig,
     noise::{self},
     ping::Behaviour as Ping,
-    quic::async_std::Transport as AsyncQuicTransport,
-    quic::Config as QuicConfig,
     relay::client::Transport as ClientTransport,
     relay::client::{self, Behaviour as RelayClient},
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmBuilder, SwarmEvent},
@@ -25,6 +22,8 @@ use libp2p::{
     yamux::Config as YamuxConfig,
     Multiaddr, PeerId, Transport,
 };
+
+use libp2p_quic::{async_std::Transport as AsyncQuicTransport, Config as QuicConfig};
 
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
@@ -72,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
             config.push_listen_addr_updates = true;
             config
         }),
-        nat: libp2p_nat::Behaviour::new().await?,
+        nat: libp2p_nat::Behaviour::new()?,
         relay_client,
         kad: Toggle::from(Some({
             let store = MemoryStore::new(local_peer_id);
@@ -110,10 +109,6 @@ async fn main() -> anyhow::Result<()> {
         swarm.listen_on(addr)?;
     }
 
-    if let Ok(ip_addr) = swarm.behaviour().nat.external_addr().await {
-        println!("External Address: {ip_addr}");
-    }
-
     while let Some(event) = swarm.next().await {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
@@ -128,10 +123,7 @@ async fn main() -> anyhow::Result<()> {
                         ..
                     },
             })) => {
-                if protocols
-                    .iter()
-                    .any(|p| p.as_bytes() == libp2p::kad::protocol::DEFAULT_PROTO_NAME)
-                {
+                if protocols.iter().any(|p| libp2p::kad::PROTOCOL_NAME.eq(p)) {
                     if let Some(kad) = swarm.behaviour_mut().kad.as_mut() {
                         for addr in &listen_addrs {
                             kad.add_address(&peer_id, addr.clone());
@@ -141,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
 
                 if protocols
                     .iter()
-                    .any(|p| p.as_bytes() == libp2p::autonat::DEFAULT_PROTOCOL_NAME)
+                    .any(|p| libp2p::autonat::DEFAULT_PROTOCOL_NAME.eq(p))
                 {
                     for addr in listen_addrs.clone() {
                         swarm
@@ -165,7 +157,7 @@ pub fn build_transport(
 ) -> io::Result<Boxed<(PeerId, StreamMuxerBox)>> {
     let noise_config = noise::Config::new(&keypair).unwrap();
 
-    let multiplex_upgrade = SelectUpgrade::new(YamuxConfig::default(), MplexConfig::new());
+    let multiplex_upgrade = YamuxConfig::default();
 
     let quic_transport = AsyncQuicTransport::new(QuicConfig::new(&keypair));
 
@@ -202,7 +194,5 @@ fn generate_ed25519(secret_key_seed: u8) -> identity::Keypair {
     let mut bytes = [0u8; 32];
     bytes[0] = secret_key_seed;
 
-    let secret_key = identity::ed25519::SecretKey::try_from_bytes(&mut bytes)
-        .expect("this returns `Err` only if the length is wrong; the length is correct; qed");
-    identity::Keypair::Ed25519(secret_key.into())
+    identity::Keypair::ed25519_from_bytes(bytes).unwrap()
 }

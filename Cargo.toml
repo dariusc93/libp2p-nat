@@ -16,7 +16,7 @@ tokio = ["dep:tokio", "igd-next/aio_tokio", "natpmp/tokio"]
 async-std = ["dep:async-std", "igd-next/aio_async_std", "natpmp/async-std"]
 
 [dependencies]
-libp2p = { version = "0.51" }
+libp2p = { version = "0.52" }
 futures = "0.3"
 igd-next = { version = "0.13", default-features = false }
 void = "1"
@@ -30,7 +30,11 @@ wasm-timer = "0.2"
 natpmp = { version = "0.4", default-features = false }
 
 [dev-dependencies]
-libp2p = { version = "0.51", features = ["full"] }
+libp2p = { version = "0.52", features = ["full"] }
+libp2p-quic = { git = "https://github.com/libp2p/rust-libp2p", rev = "2910c985e8ab75b52d36701b9c7717ebf0fd8585", features = ["async-std"]}
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 env_logger = "0.10"
+
+[patch.crates-io]
+libp2p = { version = "0.52", git = "https://github.com/libp2p/rust-libp2p", rev = "2910c985e8ab75b52d36701b9c7717ebf0fd8585" }

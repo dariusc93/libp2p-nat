@@ -25,9 +25,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 #[allow(clippy::type_complexity)]
 pub struct Behaviour {
-    events: VecDeque<
-        swarm::ToSwarm<<Self as NetworkBehaviour>::OutEvent, THandlerInEvent<Self>>,
-    >,
+    events: VecDeque<swarm::ToSwarm<<Self as NetworkBehaviour>::ToSwarm, THandlerInEvent<Self>>>,
     nat_sender: futures::channel::mpsc::UnboundedSender<NatCommands>,
     futures: HashMap<
         ListenerId,
@@ -41,17 +39,17 @@ pub struct Behaviour {
 
 impl Behaviour {
     #[cfg(any(feature = "tokio", feature = "async-std"))]
-    pub async fn new() -> anyhow::Result<Self> {
-        Self::with_duration(Duration::from_secs(2 * 60)).await
+    pub fn new() -> anyhow::Result<Self> {
+        Self::with_duration(Duration::from_secs(2 * 60))
     }
 
     #[cfg(any(feature = "tokio", feature = "async-std"))]
-    pub async fn with_duration(duration: Duration) -> anyhow::Result<Self> {
+    pub fn with_duration(duration: Duration) -> anyhow::Result<Self> {
         if duration.as_secs() < 60 {
             anyhow::bail!("Duration must be 60 seconds or more");
         }
         let renewal = duration / 2;
-        let nat_sender = task::port_forwarding_task().await?;
+        let nat_sender = futures::executor::block_on(task::port_forwarding_task())??;
         Ok(Self {
             events: Default::default(),
             nat_sender,
@@ -127,7 +125,7 @@ impl Behaviour {
 
 impl NetworkBehaviour for Behaviour {
     type ConnectionHandler = DummyConnectionHandler;
-    type OutEvent = void::Void;
+    type ToSwarm = void::Void;
 
     fn handle_established_inbound_connection(
         &mut self,
@@ -197,7 +195,7 @@ impl NetworkBehaviour for Behaviour {
         &mut self,
         cx: &mut Context,
         _: &mut impl PollParameters,
-    ) -> Poll<swarm::ToSwarm<Self::OutEvent, THandlerInEvent<Self>>> {
+    ) -> Poll<swarm::ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(event);
         }

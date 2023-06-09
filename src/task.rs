@@ -28,17 +28,33 @@ pub enum NatCommands {
 
 #[inline]
 #[cfg(any(feature = "tokio", feature = "async-std"))]
-pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
+pub fn port_forwarding_task() -> oneshot::Receiver<anyhow::Result<UnboundedSender<NatCommands>>> {
     let (tx, mut rx) = unbounded();
-    #[cfg(feature = "tokio")]
-    #[cfg(not(target_os = "ios"))]
-    let nat_handle = std::sync::Arc::new(natpmp::new_tokio_natpmp().await?);
-
-    #[cfg(feature = "async-std")]
-    #[cfg(not(target_os = "ios"))]
-    let nat_handle = std::sync::Arc::new(natpmp::new_async_std_natpmp().await?);
+    let (result_tx, result_rx) = oneshot::channel::<anyhow::Result<UnboundedSender<NatCommands>>>();
 
     let fut = async move {
+        #[cfg(feature = "tokio")]
+        #[cfg(not(target_os = "ios"))]
+        let nat_handle = match natpmp::new_tokio_natpmp().await {
+            Ok(handle) => std::sync::Arc::new(handle),
+            Err(e) => {
+                let _ = result_tx.send(Err(anyhow::Error::from(e)));
+                return;
+            }
+        };
+
+        #[cfg(feature = "async-std")]
+        #[cfg(not(target_os = "ios"))]
+        let nat_handle = match natpmp::new_async_std_natpmp().await {
+            Ok(handle) => std::sync::Arc::new(handle),
+            Err(e) => {
+                let _ = result_tx.send(Err(anyhow::Error::from(e)));
+                return;
+            }
+        };
+
+        let _ = result_tx.send(Ok(tx));
+
         while let Some(cmd) = rx.next().await {
             match cmd {
                 NatCommands::ForwardPort(addr, duration, res) => {
@@ -178,7 +194,7 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
     #[cfg(feature = "async-std")]
     async_std::task::spawn(fut);
 
-    Ok(tx)
+    result_rx
 }
 
 #[inline]
