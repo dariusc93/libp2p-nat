@@ -10,6 +10,7 @@ pub enum MappingProtocol {
     UDP,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl From<natpmp::Protocol> for MappingProtocol {
     fn from(protocol: natpmp::Protocol) -> Self {
         match protocol {
@@ -37,6 +38,7 @@ impl From<MappingProtocol> for PortMappingProtocol {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 impl From<MappingProtocol> for natpmp::Protocol {
     fn from(protocol: MappingProtocol) -> Self {
         match protocol {
