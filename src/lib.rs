@@ -16,7 +16,6 @@ use libp2p::swarm::{
 };
 use libp2p::PeerId;
 use std::collections::hash_map::Entry;
-use std::net::IpAddr;
 use std::pin::Pin;
 use std::time::Duration;
 use task::NatCommands;
@@ -102,7 +101,7 @@ impl Behaviour {
     /// Note: This uses nat-pmp for fetching external address at this time.
     #[cfg(any(feature = "tokio", feature = "async-std"))]
     #[cfg(not(target_os = "ios"))]
-    pub async fn external_addr(&self) -> anyhow::Result<IpAddr> {
+    pub async fn external_addr(&self) -> anyhow::Result<std::net::IpAddr> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .nat_sender
@@ -115,7 +114,7 @@ impl Behaviour {
     /// Note: This uses nat-pmp for fetching external address at this time.
     #[cfg(not(any(feature = "tokio", feature = "async-std")))]
     #[cfg(not(target_os = "ios"))]
-    pub fn external_addr(&self) -> anyhow::Result<IpAddr> {
+    pub fn external_addr(&self) -> anyhow::Result<std::net::IpAddr> {
         let (tx, rx) = oneshot::channel();
         #[cfg(not(target_os = "ios"))]
         let _ = self
