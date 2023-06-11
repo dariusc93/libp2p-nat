@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
             config.push_listen_addr_updates = true;
             config
         }),
-        nat: libp2p_nat::Behaviour::new()?,
+        nat: libp2p_nat::Behaviour::new().await?,
         relay_client,
         kad: Toggle::from(Some({
             let store = MemoryStore::new(local_peer_id);

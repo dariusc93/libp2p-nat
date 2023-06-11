@@ -28,7 +28,7 @@ pub enum NatCommands {
 
 #[inline]
 #[cfg(any(feature = "tokio", feature = "async-std"))]
-pub fn port_forwarding_task() -> oneshot::Receiver<anyhow::Result<UnboundedSender<NatCommands>>> {
+pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
     let (tx, mut rx) = unbounded();
     let (result_tx, result_rx) = oneshot::channel::<anyhow::Result<UnboundedSender<NatCommands>>>();
 
@@ -194,7 +194,7 @@ pub fn port_forwarding_task() -> oneshot::Receiver<anyhow::Result<UnboundedSende
     #[cfg(feature = "async-std")]
     async_std::task::spawn(fut);
 
-    result_rx
+    result_rx.await?
 }
 
 #[inline]

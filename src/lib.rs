@@ -39,17 +39,17 @@ pub struct Behaviour {
 
 impl Behaviour {
     #[cfg(any(feature = "tokio", feature = "async-std"))]
-    pub fn new() -> anyhow::Result<Self> {
-        Self::with_duration(Duration::from_secs(2 * 60))
+    pub async fn new() -> anyhow::Result<Self> {
+        Self::with_duration(Duration::from_secs(2 * 60)).await
     }
 
     #[cfg(any(feature = "tokio", feature = "async-std"))]
-    pub fn with_duration(duration: Duration) -> anyhow::Result<Self> {
+    pub async fn with_duration(duration: Duration) -> anyhow::Result<Self> {
         if duration.as_secs() < 60 {
             anyhow::bail!("Duration must be 60 seconds or more");
         }
         let renewal = duration / 2;
-        let nat_sender = futures::executor::block_on(task::port_forwarding_task())??;
+        let nat_sender = task::port_forwarding_task().await?;
         Ok(Self {
             events: Default::default(),
             nat_sender,
