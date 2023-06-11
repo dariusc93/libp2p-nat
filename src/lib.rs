@@ -41,12 +41,10 @@ pub struct Behaviour {
 }
 
 impl Behaviour {
-    #[cfg(any(feature = "tokio", feature = "async-std"))]
     pub async fn new() -> anyhow::Result<Self> {
         Self::with_duration(Duration::from_secs(2 * 60)).await
     }
 
-    #[cfg(any(feature = "tokio", feature = "async-std"))]
     pub async fn with_duration(duration: Duration) -> anyhow::Result<Self> {
         if duration.as_secs() < 60 {
             anyhow::bail!("Duration must be 60 seconds or more");
@@ -77,7 +75,6 @@ impl Behaviour {
 
     /// Gets external address
     /// Note: This uses nat-pmp for fetching external address at this time.
-    #[cfg(any(feature = "tokio", feature = "async-std"))]
     #[cfg(not(target_os = "ios"))]
     pub async fn external_addr(&self) -> anyhow::Result<std::net::IpAddr> {
         let (tx, rx) = oneshot::channel();
