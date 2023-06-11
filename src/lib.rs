@@ -38,17 +38,41 @@ pub struct Behaviour {
 }
 
 impl Behaviour {
-    
+    #[cfg(any(feature = "tokio", feature = "async-std"))]
     pub fn new() -> anyhow::Result<Self> {
         Self::with_duration(Duration::from_secs(2 * 60))
     }
 
+    #[cfg(any(feature = "tokio", feature = "async-std"))]
     pub fn with_duration(duration: Duration) -> anyhow::Result<Self> {
         if duration.as_secs() < 60 {
             anyhow::bail!("Duration must be 60 seconds or more");
         }
         let renewal = duration / 2;
         let nat_sender = futures::executor::block_on(task::port_forwarding_task())??;
+        Ok(Self {
+            events: Default::default(),
+            nat_sender,
+            futures: Default::default(),
+            duration,
+            renewal_interval: Interval::new(renewal),
+            local_listeners: Default::default(),
+            disabled: false,
+        })
+    }
+
+    #[cfg(not(any(feature = "tokio", feature = "async-std")))]
+    pub fn new() -> anyhow::Result<Self> {
+        Self::with_duration(Duration::from_secs(2 * 60))
+    }
+
+    #[cfg(not(any(feature = "tokio", feature = "async-std")))]
+    pub fn with_duration(duration: Duration) -> anyhow::Result<Self> {
+        if duration.as_secs() < 60 {
+            anyhow::bail!("Duration must be 60 seconds or more");
+        }
+        let renewal = duration / 2;
+        let nat_sender = task::port_forwarding_task()?;
         Ok(Self {
             events: Default::default(),
             nat_sender,
@@ -75,8 +99,22 @@ impl Behaviour {
     /// Note: This uses nat-pmp for fetching external address at this time.
     #[cfg(any(feature = "tokio", feature = "async-std"))]
     #[cfg(not(target_os = "ios"))]
+    pub async fn external_addr(&self) -> anyhow::Result<std::net::IpAddr> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .nat_sender
+            .clone()
+            .unbounded_send(NatCommands::NatpmpExternalAddr(tx));
+        rx.await?
+    }
+
+    /// Gets external address
+    /// Note: This uses nat-pmp for fetching external address at this time.
+    #[cfg(not(any(feature = "tokio", feature = "async-std")))]
+    #[cfg(not(target_os = "ios"))]
     pub fn external_addr(&self) -> anyhow::Result<std::net::IpAddr> {
         let (tx, rx) = oneshot::channel();
+        #[cfg(not(target_os = "ios"))]
         let _ = self
             .nat_sender
             .clone()
