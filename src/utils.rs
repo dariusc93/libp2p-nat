@@ -1,4 +1,4 @@
-use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use igd_next::PortMappingProtocol;
 use libp2p::{multiaddr::Protocol, Multiaddr};
@@ -77,4 +77,38 @@ pub fn multiaddr_to_socket_port(addr: &Multiaddr) -> Option<(SocketAddr, Mapping
     addr.set_port(port);
 
     Some((addr, protocol))
+}
+
+pub enum IpOrSocket {
+    Socket(SocketAddr),
+    Ip(IpAddr)
+}
+
+impl From<SocketAddr> for IpOrSocket {
+    fn from(socket: SocketAddr) -> Self {
+        IpOrSocket::Socket(socket)
+    }
+}
+
+impl From<IpAddr> for IpOrSocket {
+    fn from(ip: IpAddr) -> Self {
+        IpOrSocket::Ip(ip)
+    }
+}
+
+pub fn to_multipaddr(addr: SocketAddr, proto: MappingProtocol) -> Multiaddr {
+    let port = addr.port();
+    let ip = addr.ip();
+    let mut multiaddr = Multiaddr::empty();
+    match ip {
+        IpAddr::V4(ip) => multiaddr.push(Protocol::Ip4(ip)),
+        IpAddr::V6(ip) => multiaddr.push(Protocol::Ip6(ip)),
+    }
+
+    match proto {
+        MappingProtocol::TCP => multiaddr.push(Protocol::Tcp(port)),
+        MappingProtocol::UDP => multiaddr.push(Protocol::Udp(port))
+    }
+
+    multiaddr
 }

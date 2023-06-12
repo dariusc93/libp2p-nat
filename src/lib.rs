@@ -12,13 +12,14 @@ use libp2p::swarm::{
     self, dummy::ConnectionHandler as DummyConnectionHandler, NetworkBehaviour, PollParameters,
 };
 use libp2p::swarm::{
-    ConnectionDenied, ConnectionId, ExpiredListenAddr, NewListenAddr, THandler, THandlerInEvent,
+    ConnectionDenied, ConnectionId, ExpiredListenAddr, ExternalAddrExpired,
+    NewExternalAddrCandidate, NewListenAddr, THandler, THandlerInEvent, ToSwarm,
 };
 use libp2p::PeerId;
 use std::collections::hash_map::Entry;
 use std::pin::Pin;
 use std::time::Duration;
-use task::NatCommands;
+use task::{ForwardingFailed, NatCommands};
 use wasm_timer::Interval;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -32,10 +33,12 @@ pub struct Behaviour {
     nat_sender: futures::channel::mpsc::UnboundedSender<NatCommands>,
     futures: HashMap<
         ListenerId,
-        FuturesOrdered<BoxFuture<'static, Result<anyhow::Result<()>, Canceled>>>,
+        FuturesOrdered<BoxFuture<'static, Result<Result<Multiaddr, ForwardingFailed>, Canceled>>>,
     >,
     duration: Duration,
     renewal_interval: Interval,
+    external_address: HashSet<Multiaddr>,
+    pending_external_address: HashSet<Multiaddr>,
     local_listeners: HashMap<ListenerId, HashSet<Multiaddr>>,
     disabled: bool,
 }
@@ -58,6 +61,8 @@ impl Behaviour {
             duration,
             renewal_interval: Interval::new(renewal),
             local_listeners: Default::default(),
+            external_address: Default::default(),
+            pending_external_address: Default::default(),
             disabled: false,
         })
     }
@@ -71,6 +76,10 @@ impl Behaviour {
     /// Note: This does not remove the current lease but instead will not allow them to be renewed
     pub fn disable(&mut self) {
         self.disabled = true;
+        for addr in self.external_address.drain() {
+            self.events.push_back(ToSwarm::ExternalAddrExpired(addr));
+        }
+        self.external_address.clear();
     }
 
     /// Gets external address
@@ -122,24 +131,51 @@ impl NetworkBehaviour for Behaviour {
         match event {
             swarm::FromSwarm::NewListenAddr(NewListenAddr { listener_id, addr }) => {
                 // Used to make sure we only obtain private ips
-                if let Some((_, _)) = utils::multiaddr_to_socket_port(addr) {
-                    self.local_listeners
-                        .entry(listener_id)
-                        .or_default()
-                        .insert(addr.clone());
-
-                    let (tx, rx) = oneshot::channel();
-
-                    let _ = self
-                        .nat_sender
-                        .clone()
-                        .unbounded_send(NatCommands::ForwardPort(addr.clone(), self.duration, tx));
-
-                    self.futures
-                        .entry(listener_id)
-                        .or_default()
-                        .push_back(rx.boxed())
+                if utils::multiaddr_to_socket_port(addr).is_none() {
+                    return;
                 }
+
+                self.local_listeners
+                    .entry(listener_id)
+                    .or_default()
+                    .insert(addr.clone());
+
+                let (tx, rx) = oneshot::channel();
+
+                let _ = self
+                    .nat_sender
+                    .clone()
+                    .unbounded_send(NatCommands::ForwardPort(addr.clone(), self.duration, tx));
+
+                self.futures
+                    .entry(listener_id)
+                    .or_default()
+                    .push_back(rx.boxed())
+            }
+            swarm::FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate { addr }) => {
+                if !self.pending_external_address.remove(addr) {
+                    return;
+                }
+
+                if self.disabled {
+                    return;
+                }
+
+                if self.external_address.contains(addr) {
+                    return;
+                }
+
+                self.external_address.insert(addr.clone());
+
+                self.events
+                    .push_back(ToSwarm::ExternalAddrConfirmed(addr.clone()));
+            }
+            swarm::FromSwarm::ExternalAddrExpired(ExternalAddrExpired { addr }) => {
+                if !self.external_address.contains(addr) {
+                    return;
+                }
+
+                self.external_address.remove(addr);
             }
             swarm::FromSwarm::ExpiredListenAddr(ExpiredListenAddr { listener_id, addr }) => {
                 if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id) {
@@ -163,6 +199,7 @@ impl NetworkBehaviour for Behaviour {
             return Poll::Ready(event);
         }
 
+
         if !self.disabled {
             let lids = self.futures.keys().copied().collect::<Vec<_>>();
 
@@ -172,11 +209,21 @@ impl NetworkBehaviour for Behaviour {
 
                     match Pin::new(list).poll_next_unpin(cx) {
                         Poll::Ready(Some(result)) => match result {
-                            Ok(Ok(_)) => {
-                                log::debug!("Successful with port forwarding");
+                            Ok(Ok(address)) => {
+                                if !self.external_address.contains(&address)
+                                    && !self.pending_external_address.contains(&address)
+                                {
+                                    self.pending_external_address.insert(address.clone());
+                                    self.events
+                                        .push_back(ToSwarm::NewExternalAddrCandidate(address));
+                                }
                             }
-                            Ok(Err(e)) => {
-                                log::error!("Error attempting to port forward: {e}");
+                            Ok(Err(ForwardingFailed(_, addr))) => {
+                                //Used as a filter for any invalid addresses during the initial pass
+                                if let Entry::Occupied(mut le) = self.local_listeners.entry(id) {
+                                    log::debug!("Removing {addr} from local listeners");
+                                    le.get_mut().remove(&addr);
+                                }
                             }
                             Err(_) => {
                                 log::error!("Channel has dropped");
