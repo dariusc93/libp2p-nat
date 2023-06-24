@@ -32,10 +32,7 @@ natpmp = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 libp2p = { version = "0.52", features = ["full"] }
-libp2p-quic = { git = "https://github.com/libp2p/rust-libp2p", rev = "2c6c058bb7b0d373e05835fead3f8e63e3240583", features = ["async-std"]}
+libp2p-quic = { version = "0.8.0-alpha", features = ["async-std"]}
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 env_logger = "0.10"
-
-[patch.crates-io]
-libp2p = { version = "0.52", git = "https://github.com/libp2p/rust-libp2p", rev = "2c6c058bb7b0d373e05835fead3f8e63e3240583" }
