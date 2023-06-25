@@ -13,7 +13,7 @@ use futures::{
 use igd_next::aio;
 
 use igd_next::SearchOptions;
-use libp2p::Multiaddr;
+use libp2p::{multiaddr::Protocol, Multiaddr};
 
 use crate::utils::multiaddr_to_socket_port;
 
@@ -34,11 +34,27 @@ pub enum NatCommands {
     NatpmpExternalAddr(oneshot::Sender<anyhow::Result<IpAddr>>),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum QuicType {
+    Draft29,
+    V1,
+}
+
+impl From<QuicType> for Protocol<'_> {
+    fn from(qty: QuicType) -> Self {
+        match qty {
+            QuicType::Draft29 => Protocol::Quic,
+            QuicType::V1 => Protocol::QuicV1,
+        }
+    }
+}
+
 #[inline]
 #[cfg(any(feature = "tokio", feature = "async-std"))]
 pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
     use igd_next::AddPortError;
-    use libp2p::multiaddr::Protocol;
+
+    use crate::utils::to_multipaddr;
 
     let (tx, mut rx) = unbounded();
     let (result_tx, result_rx) = oneshot::channel::<anyhow::Result<UnboundedSender<NatCommands>>>();
@@ -69,7 +85,7 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
         while let Some(cmd) = rx.next().await {
             match cmd {
                 NatCommands::ForwardPort(multiaddr, duration, res) => {
-                    let Some((addr, protocol)) = multiaddr_to_socket_port(&multiaddr) else {
+                    let Some((addr, protocol, qty)) = multiaddr_to_socket_port(&multiaddr) else {
                         let _ = res.send(Err(ForwardingFailed(anyhow::anyhow!("address is invalid"), multiaddr)));
                         continue;
                     };
@@ -102,20 +118,8 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                                         }
                                     };
 
-                                    let multi_proto = match ext_addr {
-                                        IpAddr::V4(ip4) => Protocol::Ip4(ip4),
-                                        IpAddr::V6(ip6) => Protocol::Ip6(ip6),
-                                    };
-
-                                    let multiaddr = multiaddr
-                                        .iter()
-                                        .map(|p| match p {
-                                            Protocol::Ip4(_) | Protocol::Ip6(_) => {
-                                                multi_proto.clone()
-                                            }
-                                            p => p,
-                                        })
-                                        .collect();
+                                    let multiaddr =
+                                        to_multipaddr((ext_addr, addr.port()), protocol, qty);
 
                                     let _ = res.send(Ok(multiaddr));
                                     continue;

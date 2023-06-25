@@ -1,7 +1,9 @@
-use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6, Ipv4Addr, Ipv6Addr};
 
 use igd_next::PortMappingProtocol;
 use libp2p::{multiaddr::Protocol, Multiaddr};
+
+use crate::task::QuicType;
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -48,7 +50,9 @@ impl From<MappingProtocol> for natpmp::Protocol {
     }
 }
 
-pub fn multiaddr_to_socket_port(addr: &Multiaddr) -> Option<(SocketAddr, MappingProtocol)> {
+pub(crate) fn multiaddr_to_socket_port(
+    addr: &Multiaddr,
+) -> Option<(SocketAddr, MappingProtocol, Option<QuicType>)> {
     let mut iter = addr.iter();
     let Some(mut addr) = iter
         .next()
@@ -74,14 +78,20 @@ pub fn multiaddr_to_socket_port(addr: &Multiaddr) -> Option<(SocketAddr, Mapping
             _ => None,
         }) else { return None; };
 
+    let quic_type = iter.next().and_then(|proto| match proto {
+        Protocol::Quic => Some(QuicType::Draft29),
+        Protocol::QuicV1 => Some(QuicType::V1),
+        _ => None,
+    });
+
     addr.set_port(port);
 
-    Some((addr, protocol))
+    Some((addr, protocol, quic_type))
 }
 
 pub enum IpOrSocket {
     Socket(SocketAddr),
-    Ip(IpAddr)
+    Ip(IpAddr, u16),
 }
 
 impl From<SocketAddr> for IpOrSocket {
@@ -90,15 +100,33 @@ impl From<SocketAddr> for IpOrSocket {
     }
 }
 
-impl From<IpAddr> for IpOrSocket {
-    fn from(ip: IpAddr) -> Self {
-        IpOrSocket::Ip(ip)
+impl From<(IpAddr, u16)> for IpOrSocket {
+    fn from((ip, port): (IpAddr, u16)) -> Self {
+        IpOrSocket::Ip(ip, port)
     }
 }
 
-pub fn to_multipaddr(addr: SocketAddr, proto: MappingProtocol) -> Multiaddr {
-    let port = addr.port();
-    let ip = addr.ip();
+impl From<(Ipv4Addr, u16)> for IpOrSocket {
+    fn from((ip, port): (Ipv4Addr, u16)) -> Self {
+        IpOrSocket::Ip(ip.into(), port)
+    }
+}
+
+impl From<(Ipv6Addr, u16)> for IpOrSocket {
+    fn from((ip, port): (Ipv6Addr, u16)) -> Self {
+        IpOrSocket::Ip(ip.into(), port)
+    }
+}
+
+pub(crate) fn to_multipaddr<IS: Into<IpOrSocket>>(
+    addr: IS,
+    proto: MappingProtocol,
+    quic_opt: Option<QuicType>,
+) -> Multiaddr {
+    let (ip, port) = match addr.into() {
+        IpOrSocket::Socket(socket) => (socket.ip(), socket.port()),
+        IpOrSocket::Ip(ip, port) => (ip, port),
+    };
     let mut multiaddr = Multiaddr::empty();
     match ip {
         IpAddr::V4(ip) => multiaddr.push(Protocol::Ip4(ip)),
@@ -107,7 +135,15 @@ pub fn to_multipaddr(addr: SocketAddr, proto: MappingProtocol) -> Multiaddr {
 
     match proto {
         MappingProtocol::TCP => multiaddr.push(Protocol::Tcp(port)),
-        MappingProtocol::UDP => multiaddr.push(Protocol::Udp(port))
+        MappingProtocol::UDP => multiaddr.push(Protocol::Udp(port)),
+    }
+
+    if let Some(option) = quic_opt {
+        assert!(multiaddr
+            .iter()
+            .any(|proto| matches!(proto, Protocol::Udp(_))));
+
+        multiaddr.push(option.into());
     }
 
     multiaddr

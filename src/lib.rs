@@ -82,16 +82,9 @@ impl Behaviour {
         self.external_address.clear();
     }
 
-    /// Gets external address
-    /// Note: This uses nat-pmp for fetching external address at this time.
-    #[cfg(not(target_os = "ios"))]
-    pub async fn external_addr(&self) -> anyhow::Result<std::net::IpAddr> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .nat_sender
-            .clone()
-            .unbounded_send(NatCommands::NatpmpExternalAddr(tx));
-        rx.await?
+    /// Gets external addresses 
+    pub fn external_addr(&self) -> Vec<Multiaddr> {
+        Vec::from_iter(self.external_address.iter().cloned())
     }
 }
 
@@ -198,7 +191,6 @@ impl NetworkBehaviour for Behaviour {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(event);
         }
-
 
         if !self.disabled {
             let lids = self.futures.keys().copied().collect::<Vec<_>>();

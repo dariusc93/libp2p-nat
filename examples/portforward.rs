@@ -29,6 +29,7 @@ use libp2p_quic::{async_std::Transport as AsyncQuicTransport, Config as QuicConf
 pub struct Behaviour {
     relay_client: RelayClient,
     identify: Identify,
+    notifier: ext_behaviour::Behaviour,
     autonat: Autonat,
     nat: libp2p_nat::Behaviour,
     ping: Ping,
@@ -77,21 +78,22 @@ async fn main() -> anyhow::Result<()> {
             let store = MemoryStore::new(local_peer_id);
             Kademlia::new(local_peer_id, store)
         })),
+        notifier: ext_behaviour::Behaviour::default(),
     };
 
     let mut swarm = SwarmBuilder::with_tokio_executor(transport, behaviour, local_peer_id).build();
 
     let bootaddr = Multiaddr::from_str("/dnsaddr/bootstrap.libp2p.io")?;
-    for peer_id in [
-        "QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-        "QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-        "QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-        "QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-    ]
-    .iter()
-    .filter_map(|p| p.parse().ok())
-    {
-        if let Some(kad) = swarm.behaviour_mut().kad.as_mut() {
+    if let Some(kad) = swarm.behaviour_mut().kad.as_mut() {
+        for peer_id in [
+            "QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+            "QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+            "QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+            "QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+        ]
+        .iter()
+        .filter_map(|p| p.parse().ok())
+        {
             kad.add_address(&peer_id, bootaddr.clone());
         }
     }
@@ -123,14 +125,6 @@ async fn main() -> anyhow::Result<()> {
                         ..
                     },
             })) => {
-                if protocols.iter().any(|p| libp2p::kad::PROTOCOL_NAME.eq(p)) {
-                    if let Some(kad) = swarm.behaviour_mut().kad.as_mut() {
-                        for addr in &listen_addrs {
-                            kad.add_address(&peer_id, addr.clone());
-                        }
-                    }
-                }
-
                 if protocols
                     .iter()
                     .any(|p| libp2p::autonat::DEFAULT_PROTOCOL_NAME.eq(p))
@@ -195,4 +189,145 @@ fn generate_ed25519(secret_key_seed: u8) -> identity::Keypair {
     bytes[0] = secret_key_seed;
 
     identity::Keypair::ed25519_from_bytes(bytes).unwrap()
+}
+
+// Behaviour to use for printing out external addresses due to `Swarm` not emitting such events directly
+mod ext_behaviour {
+    use std::{
+        collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
+        task::{Context, Poll},
+    };
+
+    use libp2p::{
+        core::Endpoint,
+        swarm::{
+            derive_prelude::{ExternalAddrConfirmed, ListenerId},
+            dummy, ConnectionDenied, ConnectionId, ExpiredListenAddr, ExternalAddrExpired,
+            FromSwarm, ListenerClosed, NetworkBehaviour, NewListenAddr, PollParameters, THandler,
+            THandlerInEvent, THandlerOutEvent, ToSwarm,
+        },
+        Multiaddr, PeerId,
+    };
+
+    #[allow(clippy::type_complexity)]
+    #[derive(Debug, Default)]
+    pub struct Behaviour {
+        events: VecDeque<ToSwarm<<Self as NetworkBehaviour>::ToSwarm, THandlerInEvent<Self>>>,
+        listener: HashMap<ListenerId, Vec<Multiaddr>>,
+        external: HashSet<Multiaddr>,
+    }
+
+    impl NetworkBehaviour for Behaviour {
+        type ConnectionHandler = dummy::ConnectionHandler;
+        type ToSwarm = void::Void;
+
+        fn handle_established_inbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: &Multiaddr,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(dummy::ConnectionHandler)
+        }
+
+        fn handle_established_outbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: Endpoint,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(dummy::ConnectionHandler)
+        }
+
+        fn handle_pending_inbound_connection(
+            &mut self,
+            _connection_id: libp2p::swarm::ConnectionId,
+            _local_addr: &libp2p::Multiaddr,
+            _remote_addr: &libp2p::Multiaddr,
+        ) -> Result<(), libp2p::swarm::ConnectionDenied> {
+            Ok(())
+        }
+
+        fn handle_pending_outbound_connection(
+            &mut self,
+            _connection_id: libp2p::swarm::ConnectionId,
+            _maybe_peer: Option<libp2p::PeerId>,
+            _addresses: &[libp2p::Multiaddr],
+            _effective_role: libp2p::core::Endpoint,
+        ) -> Result<Vec<libp2p::Multiaddr>, libp2p::swarm::ConnectionDenied> {
+            Ok(vec![])
+        }
+
+        fn on_connection_handler_event(
+            &mut self,
+            _: libp2p::PeerId,
+            _: ConnectionId,
+            _: THandlerOutEvent<Self>,
+        ) {
+        }
+
+        fn on_swarm_event(&mut self, event: FromSwarm<Self::ConnectionHandler>) {
+            match event {
+                FromSwarm::NewListenAddr(NewListenAddr { addr, listener_id }) => {
+                    match self.listener.entry(listener_id) {
+                        Entry::Occupied(mut entry) => {
+                            let list = entry.get_mut();
+                            if !list.contains(addr) {
+                                list.push(addr.clone());
+                                println!("Listening on (l): {addr}");
+                            }
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert(vec![addr.clone()]);
+                            println!("Listening on (l): {addr}");
+                        }
+                    }
+                }
+                FromSwarm::ExternalAddrConfirmed(ExternalAddrConfirmed { addr }) => {
+                    if self.external.insert(addr.clone()) {
+                        println!("Listening on (e): {addr}");
+                    }
+                }
+                FromSwarm::ExternalAddrExpired(ExternalAddrExpired { addr }) => {
+                    if self.external.remove(addr) {
+                        println!("Stopped listening on (e): {addr}");
+                    }
+                }
+                FromSwarm::ExpiredListenAddr(ExpiredListenAddr { addr, listener_id }) => {
+                    if let Entry::Occupied(mut entry) = self.listener.entry(listener_id) {
+                        let list = entry.get_mut();
+                        if let Some(index) = list.iter().position(|inner| addr == inner) {
+                            list.remove(index);
+                            println!("Stopped listening on (l): {addr}");
+                        }
+
+                        if list.is_empty() {
+                            entry.remove();
+                        }
+                    }
+                }
+                FromSwarm::ListenerClosed(ListenerClosed { listener_id, .. }) => {
+                    if let Some(addrs) = self.listener.remove(&listener_id) {
+                        for addr in addrs {
+                            println!("Stopped listening on (l): {addr}");
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn poll(
+            &mut self,
+            _: &mut Context,
+            _: &mut impl PollParameters,
+        ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+            if let Some(event) = self.events.pop_front() {
+                return Poll::Ready(event);
+            }
+            Poll::Pending
+        }
+    }
 }
