@@ -1,6 +1,6 @@
-//TODO: Use rust directly for port mapping natpmp (and eventually PCP) so we can avoid the need for FFI from natffi
+//TODO: Use rust directly for port mapping natpmp (and eventually PCP) so we can avoid the need for FFI from nat-pmp
 
-use std::{net::IpAddr, time::Duration};
+use std::time::Duration;
 
 use futures::{
     channel::{
@@ -29,9 +29,6 @@ pub enum NatCommands {
         Duration,
         oneshot::Sender<Result<Multiaddr, ForwardingFailed>>,
     ),
-    IdgExternalAddr(oneshot::Sender<anyhow::Result<IpAddr>>),
-    #[cfg(not(target_os = "ios"))]
-    NatpmpExternalAddr(oneshot::Sender<anyhow::Result<IpAddr>>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -237,62 +234,6 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                                     multiaddr,
                                 )));
                             }
-                        }
-                    }
-                }
-                NatCommands::IdgExternalAddr(res) => {
-                    let gateway = match aio::search_gateway(SearchOptions::default()).await {
-                        Ok(n) => n,
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                            continue;
-                        }
-                    };
-                    match gateway.get_external_ip().await {
-                        Ok(addr) => {
-                            let _ = res.send(Ok(addr));
-                        }
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                        }
-                    };
-                }
-                #[cfg(not(target_os = "ios"))]
-                NatCommands::NatpmpExternalAddr(res) => {
-                    //Note: Because the function contains a mutable reference, we cannot call it behind an arc. So we create
-                    //      a new instance until dep is patched upstream
-                    #[cfg(feature = "tokio")]
-                    let mut handler = match natpmp::new_tokio_natpmp().await {
-                        Ok(n) => n,
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                            continue;
-                        }
-                    };
-
-                    #[cfg(feature = "async-std")]
-                    let mut handler = match natpmp::new_async_std_natpmp().await {
-                        Ok(n) => n,
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                            continue;
-                        }
-                    };
-
-                    if let Err(e) = handler.send_public_address_request().await {
-                        let _ = res.send(Err(anyhow::Error::from(e)));
-                        continue;
-                    }
-                    match handler.read_response_or_retry().await {
-                        Ok(natpmp::Response::Gateway(gr)) => {
-                            let addr = IpAddr::V4(*gr.public_address());
-                            let _ = res.send(Ok(addr));
-                        }
-                        Ok(_) => {
-                            let _ = res.send(Err(anyhow::anyhow!("Cannot get external address")));
-                        }
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::anyhow!("Error with nat pmp: {e}")));
                         }
                     }
                 }
