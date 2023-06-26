@@ -113,9 +113,6 @@ async fn main() -> anyhow::Result<()> {
 
     while let Some(event) = swarm.next().await {
         match event {
-            SwarmEvent::NewListenAddr { address, .. } => {
-                println!("Listening on: {address}");
-            }
             SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
                 peer_id,
                 info:
