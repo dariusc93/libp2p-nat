@@ -218,7 +218,15 @@ impl NetworkBehaviour for Behaviour {
                                     le.get_mut().remove(&address);
                                 }
                             }
-                            Ok(Err(_)) => {},
+                            Ok(Err(ForwardingError::PortForwardingFailed)) => {
+                                if !self.external_address.is_empty() {
+                                    for addr in &self.external_address {
+                                        self.events
+                                            .push_back(ToSwarm::ExternalAddrExpired(addr.clone()));
+                                    }
+                                }
+                            }
+                            Ok(Err(_)) => {}
                             Err(_) => {
                                 log::error!("Channel has dropped");
                             }
