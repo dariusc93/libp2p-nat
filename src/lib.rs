@@ -19,7 +19,7 @@ use libp2p::PeerId;
 use std::collections::hash_map::Entry;
 use std::pin::Pin;
 use std::time::Duration;
-use task::{ForwardingFailed, NatCommands};
+use task::{ForwardingError, NatCommands};
 use wasm_timer::Interval;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -33,7 +33,7 @@ pub struct Behaviour {
     nat_sender: futures::channel::mpsc::UnboundedSender<NatCommands>,
     futures: HashMap<
         ListenerId,
-        FuturesOrdered<BoxFuture<'static, Result<Result<Multiaddr, ForwardingFailed>, Canceled>>>,
+        FuturesOrdered<BoxFuture<'static, Result<Result<Multiaddr, ForwardingError>, Canceled>>>,
     >,
     duration: Duration,
     renewal_interval: Interval,
@@ -82,7 +82,7 @@ impl Behaviour {
         self.external_address.clear();
     }
 
-    /// Gets external addresses 
+    /// Gets external addresses
     pub fn external_addr(&self) -> Vec<Multiaddr> {
         Vec::from_iter(self.external_address.iter().cloned())
     }
@@ -210,13 +210,15 @@ impl NetworkBehaviour for Behaviour {
                                         .push_back(ToSwarm::NewExternalAddrCandidate(address));
                                 }
                             }
-                            Ok(Err(ForwardingFailed(_, addr))) => {
-                                //Used as a filter for any invalid addresses during the initial pass
+                            Ok(Err(ForwardingError::InvalidAddress { address })) => {
+                                //Used as a filter for any invalid addresses
+                                //TODO: Probably do a prefilter when listening but before attempting to perform a port forward
                                 if let Entry::Occupied(mut le) = self.local_listeners.entry(id) {
-                                    log::debug!("Removing {addr} from local listeners");
-                                    le.get_mut().remove(&addr);
+                                    log::debug!("Removing {address} from local listeners");
+                                    le.get_mut().remove(&address);
                                 }
                             }
+                            Ok(Err(_)) => {},
                             Err(_) => {
                                 log::error!("Channel has dropped");
                             }

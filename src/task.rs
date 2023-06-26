@@ -18,8 +18,14 @@ use libp2p::{multiaddr::Protocol, Multiaddr};
 use crate::utils::multiaddr_to_socket_port;
 
 #[derive(thiserror::Error, Debug)]
-#[error("Forwarding Error")]
-pub struct ForwardingFailed(pub anyhow::Error, pub Multiaddr);
+pub enum ForwardingError {
+    #[error("Address provided is either local or invalid")]
+    InvalidAddress { address: Multiaddr },
+    #[error("Unable to port forward")]
+    PortForwardingFailed,
+    #[error(transparent)]
+    Any(anyhow::Error),
+}
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -27,7 +33,7 @@ pub enum NatCommands {
     ForwardPort(
         Multiaddr,
         Duration,
-        oneshot::Sender<Result<Multiaddr, ForwardingFailed>>,
+        oneshot::Sender<Result<Multiaddr, ForwardingError>>,
     ),
 }
 
@@ -83,7 +89,7 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
             match cmd {
                 NatCommands::ForwardPort(multiaddr, duration, res) => {
                     let Some((addr, protocol, qty)) = multiaddr_to_socket_port(&multiaddr) else {
-                        let _ = res.send(Err(ForwardingFailed(anyhow::anyhow!("address is invalid"), multiaddr)));
+                        let _ = res.send(Err(ForwardingError::InvalidAddress{ address: multiaddr }));
                         continue;
                     };
                     let opts = SearchOptions {
@@ -107,9 +113,8 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                                     let ext_addr = match gateway.get_external_ip().await {
                                         Ok(addr) => addr,
                                         Err(e) => {
-                                            let _ = res.send(Err(ForwardingFailed(
+                                            let _ = res.send(Err(ForwardingError::Any(
                                                 anyhow::anyhow!("{e}"),
-                                                multiaddr,
                                             )));
                                             continue;
                                         }
@@ -134,10 +139,7 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
 
                     #[cfg(target_os = "ios")]
                     {
-                        let _ = res.send(Err(ForwardingFailed(
-                            anyhow::anyhow!("Unable to port forward"),
-                            multiaddr,
-                        )));
+                        let _ = res.send(Err(ForwardingError::PortForwardingFailed));
                         continue;
                     }
 
@@ -154,8 +156,8 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                             )
                             .await
                         {
-                            let _ =
-                                res.send(Err(ForwardingFailed(anyhow::Error::from(e), multiaddr)));
+                            log::error!("Error port mapping: {e}");
+                            let _ = res.send(Err(ForwardingError::PortForwardingFailed));
                             continue;
                         }
                         match nat_handle.read_response_or_retry().await {
@@ -169,9 +171,8 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                                 let mut handler = match natpmp::new_tokio_natpmp().await {
                                     Ok(n) => n,
                                     Err(e) => {
-                                        let _ = res.send(Err(ForwardingFailed(
+                                        let _ = res.send(Err(ForwardingError::Any(
                                             anyhow::anyhow!("{e}"),
-                                            multiaddr,
                                         )));
                                         continue;
                                     }
@@ -181,18 +182,15 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                                 let mut handler = match natpmp::new_async_std_natpmp().await {
                                     Ok(n) => n,
                                     Err(e) => {
-                                        let _ = res.send(Err(ForwardingFailed(
+                                        let _ = res.send(Err(ForwardingError::Any(
                                             anyhow::anyhow!("{e}"),
-                                            multiaddr,
                                         )));
                                         continue;
                                     }
                                 };
                                 if let Err(e) = handler.send_public_address_request().await {
-                                    let _ = res.send(Err(ForwardingFailed(
-                                        anyhow::anyhow!("{e}"),
-                                        multiaddr,
-                                    )));
+                                    let _ =
+                                        res.send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))));
                                     continue;
                                 }
                                 match handler.read_response_or_retry().await {
@@ -209,30 +207,26 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                                         let _ = res.send(Ok(multiaddr));
                                     }
                                     Ok(_) => {
-                                        let _ = res.send(Err(ForwardingFailed(
+                                        let _ = res.send(Err(ForwardingError::Any(
                                             anyhow::anyhow!("Cannot get external address"),
-                                            multiaddr,
                                         )));
                                     }
                                     Err(e) => {
-                                        let _ = res.send(Err(ForwardingFailed(
+                                        let _ = res.send(Err(ForwardingError::Any(
                                             anyhow::anyhow!("Error with nat pmp: {e}"),
-                                            multiaddr,
                                         )));
                                     }
                                 }
                             }
                             Ok(_) => {
-                                let _ = res.send(Err(ForwardingFailed(
-                                    anyhow::anyhow!("Unsupported result"),
-                                    multiaddr,
-                                )));
+                                let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!(
+                                    "Unsupported result"
+                                ))));
                             }
                             Err(e) => {
-                                let _ = res.send(Err(ForwardingFailed(
-                                    anyhow::anyhow!("Error with nat pmp: {e}"),
-                                    multiaddr,
-                                )));
+                                let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!(
+                                    "Error with nat pmp: {e}"
+                                ))));
                             }
                         }
                     }
