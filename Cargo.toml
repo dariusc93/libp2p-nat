@@ -14,6 +14,7 @@ exclude = [".gitignore"]
 default = ["tokio"]
 tokio = ["dep:tokio", "igd-next/aio_tokio", "natpmp/tokio"]
 async-std = ["dep:async-std", "igd-next/aio_async_std", "natpmp/async-std"]
+nat_pmp_fallback = []
 
 [dependencies]
 libp2p = { version = "0.52" }

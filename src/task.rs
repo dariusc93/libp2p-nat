@@ -63,7 +63,7 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
     let (result_tx, result_rx) = oneshot::channel::<anyhow::Result<UnboundedSender<NatCommands>>>();
 
     let fut = async move {
-        #[cfg(feature = "tokio")]
+        #[cfg(all(feature = "tokio", feature = "nat_pmp_fallback"))]
         #[cfg(not(target_os = "ios"))]
         let nat_handle = match natpmp::new_tokio_natpmp().await {
             Ok(handle) => std::sync::Arc::new(handle),
@@ -73,7 +73,7 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
             }
         };
 
-        #[cfg(feature = "async-std")]
+        #[cfg(all(feature = "async-std", feature = "nat_pmp_fallback"))]
         #[cfg(not(target_os = "ios"))]
         let nat_handle = match natpmp::new_async_std_natpmp().await {
             Ok(handle) => std::sync::Arc::new(handle),
@@ -137,12 +137,13 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                         }
                     };
 
-                    #[cfg(target_os = "ios")]
+                    #[cfg(any(target_os = "ios", not(feature = "nat_pmp_fallback")))]
                     {
                         let _ = res.send(Err(ForwardingError::PortForwardingFailed));
                         continue;
                     }
 
+                    #[cfg(feature = "nat_pmp_fallback")]
                     #[cfg(not(target_os = "ios"))]
                     {
                         // In case igd fails, we will attempt with nat-pmp before returning an error
