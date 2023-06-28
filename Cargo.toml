@@ -11,7 +11,7 @@ authors = ["Darius Clark"]
 exclude = [".gitignore"]
 
 [features]
-default = ["tokio"]
+default = ["tokio", "nat_pmp_fallback"]
 tokio = ["dep:tokio", "igd-next/aio_tokio", "natpmp/tokio"]
 async-std = ["dep:async-std", "igd-next/aio_async_std", "natpmp/async-std"]
 nat_pmp_fallback = []
