@@ -11,10 +11,10 @@ authors = ["Darius Clark"]
 exclude = [".gitignore"]
 
 [features]
-default = ["tokio", "nat_pmp_fallback"]
+default = ["tokio"]
 tokio = ["dep:tokio", "igd-next/aio_tokio", "natpmp/tokio"]
 async-std = ["dep:async-std", "igd-next/aio_async_std", "natpmp/async-std"]
-nat_pmp_fallback = []
+nat_pmp_fallback = ["natpmp"]
 
 [dependencies]
 libp2p = { version = "0.52" }
@@ -29,7 +29,7 @@ wasm-timer = "0.2"
 thiserror = "1"
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
-natpmp = { version = "0.4", default-features = false }
+natpmp = { version = "0.4", default-features = false, optional = true}
 
 [dev-dependencies]
 libp2p = { version = "0.52", features = ["full"] }

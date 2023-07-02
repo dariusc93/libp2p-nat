@@ -4,7 +4,7 @@ mod utils;
 use core::task::{Context, Poll};
 use futures::channel::oneshot::{self, Canceled};
 use futures::future::BoxFuture;
-use futures::stream::FuturesOrdered;
+use futures::stream::{FuturesOrdered, FuturesUnordered};
 use futures::{FutureExt, StreamExt};
 use libp2p::core::transport::ListenerId;
 use libp2p::core::{Endpoint, Multiaddr};
@@ -19,7 +19,7 @@ use libp2p::PeerId;
 use std::collections::hash_map::Entry;
 use std::pin::Pin;
 use std::time::Duration;
-use task::{ForwardingError, NatCommands};
+use task::{ForwardingError, NatCommands, NatType};
 use wasm_timer::Interval;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -33,8 +33,12 @@ pub struct Behaviour {
     nat_sender: futures::channel::mpsc::UnboundedSender<NatCommands>,
     futures: HashMap<
         ListenerId,
-        FuturesOrdered<BoxFuture<'static, Result<Result<Multiaddr, ForwardingError>, Canceled>>>,
+        FuturesOrdered<
+            BoxFuture<'static, Result<Result<(Multiaddr, NatType), ForwardingError>, Canceled>>,
+        >,
     >,
+    disable_futures:
+        FuturesUnordered<BoxFuture<'static, Result<Result<(), ForwardingError>, Canceled>>>,
     duration: Duration,
     renewal_interval: Interval,
     external_address: HashSet<Multiaddr>,
@@ -58,6 +62,7 @@ impl Behaviour {
             events: Default::default(),
             nat_sender,
             futures: Default::default(),
+            disable_futures: FuturesUnordered::default(),
             duration,
             renewal_interval: Interval::new(renewal),
             local_listeners: Default::default(),
@@ -70,16 +75,43 @@ impl Behaviour {
     /// Enables port forwarding
     pub fn enable(&mut self) {
         self.disabled = false;
+        self.disable_futures.clear();
     }
 
     /// Disable port forwarding
     /// Note: This does not remove the current lease but instead will not allow them to be renewed
     pub fn disable(&mut self) {
+        if self.disabled {
+            return;
+        }
+
         self.disabled = true;
+
+        // No need to continue if there are no external addresses
+        if self.external_address.is_empty() {
+            return;
+        }
+
+        for addr in self.local_listeners.values().flatten() {
+            let (tx, rx) = oneshot::channel();
+
+            let _ = self
+                .nat_sender
+                .clone()
+                .unbounded_send(NatCommands::DisableForwardPort(
+                    addr.clone(),
+                    NatType::Igd,
+                    tx,
+                ));
+
+            self.disable_futures.push(rx.boxed());
+        }
+
+        // Notify swarm about the external addresses expiring
+        // Regardless of if we successfully disable port forwarding in the background task
         for addr in self.external_address.drain() {
             self.events.push_back(ToSwarm::ExternalAddrExpired(addr));
         }
-        self.external_address.clear();
     }
 
     /// Gets external addresses
@@ -192,6 +224,20 @@ impl NetworkBehaviour for Behaviour {
             return Poll::Ready(event);
         }
 
+        loop {
+            match self.disable_futures.poll_next_unpin(cx) {
+                Poll::Ready(Some(result)) => match result {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        log::error!("Error disabling port forwarding: {e}");
+                    }
+                    Err(_) => log::error!("Channel has dropped"),
+                },
+                Poll::Ready(None) => break,
+                Poll::Pending => break,
+            }
+        }
+
         if !self.disabled {
             let lids = self.futures.keys().copied().collect::<Vec<_>>();
 
@@ -201,7 +247,7 @@ impl NetworkBehaviour for Behaviour {
 
                     match Pin::new(list).poll_next_unpin(cx) {
                         Poll::Ready(Some(result)) => match result {
-                            Ok(Ok(address)) => {
+                            Ok(Ok((address, _))) => {
                                 if !self.external_address.contains(&address)
                                     && !self.pending_external_address.contains(&address)
                                 {

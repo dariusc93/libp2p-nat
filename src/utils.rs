@@ -12,6 +12,7 @@ pub enum MappingProtocol {
     UDP,
 }
 
+#[cfg(feature = "nat_pmp_fallback")]
 #[cfg(not(target_os = "ios"))]
 impl From<natpmp::Protocol> for MappingProtocol {
     fn from(protocol: natpmp::Protocol) -> Self {
@@ -40,6 +41,7 @@ impl From<MappingProtocol> for PortMappingProtocol {
     }
 }
 
+#[cfg(feature = "nat_pmp_fallback")]
 #[cfg(not(target_os = "ios"))]
 impl From<MappingProtocol> for natpmp::Protocol {
     fn from(protocol: MappingProtocol) -> Self {
