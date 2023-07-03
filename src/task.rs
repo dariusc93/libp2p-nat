@@ -68,8 +68,6 @@ impl From<QuicType> for Protocol<'_> {
 #[inline]
 #[cfg(any(feature = "tokio", feature = "async-std"))]
 pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
-    use igd_next::AddPortError;
-
     use crate::utils::to_multipaddr;
 
     let (tx, mut rx) = unbounded();
@@ -105,48 +103,39 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                         let _ = res.send(Err(ForwardingError::InvalidAddress{ address: multiaddr }));
                         continue;
                     };
-                    let opts = SearchOptions {
-                        timeout: Some(Duration::from_secs(2)),
-                        ..Default::default()
+
+                    let igd_fut = async {
+                        let opts = SearchOptions {
+                            timeout: Some(Duration::from_secs(2)),
+                            ..Default::default()
+                        };
+
+                        let gateway = aio::search_gateway(opts).await?;
+
+                        gateway
+                            .add_port(
+                                protocol.into(),
+                                addr.port(),
+                                addr,
+                                duration.as_secs() as _,
+                                "libp2p",
+                            )
+                            .await?;
+
+                        let ext_addr = gateway.get_external_ip().await?;
+
+                        let multiaddr = to_multipaddr((ext_addr, addr.port()), protocol, qty);
+
+                        Ok::<_, igd_next::Error>(multiaddr)
                     };
 
-                    match aio::search_gateway(opts).await {
-                        Ok(gateway) => {
-                            match gateway
-                                .add_port(
-                                    protocol.into(),
-                                    addr.port(),
-                                    addr,
-                                    duration.as_secs() as _,
-                                    "libp2p",
-                                )
-                                .await
-                            {
-                                Ok(_) => {
-                                    let ext_addr = match gateway.get_external_ip().await {
-                                        Ok(addr) => addr,
-                                        Err(e) => {
-                                            let _ = res.send(Err(ForwardingError::Any(
-                                                anyhow::anyhow!("{e}"),
-                                            )));
-                                            continue;
-                                        }
-                                    };
-
-                                    let multiaddr =
-                                        to_multipaddr((ext_addr, addr.port()), protocol, qty);
-
-                                    let _ = res.send(Ok((multiaddr, NatType::Igd)));
-                                    continue;
-                                }
-                                Err(e) if matches!(e, AddPortError::PortInUse) => {}
-                                Err(e) => {
-                                    log::warn!("Error with igd: {e}");
-                                }
-                            };
+                    match igd_fut.await {
+                        Ok(addr) => {
+                            let _ = res.send(Ok((addr, NatType::Igd)));
+                            continue;
                         }
                         Err(e) => {
-                            log::warn!("Error with igd: {e}");
+                            log::error!("Error opening port with igd: {e}");
                         }
                     };
 

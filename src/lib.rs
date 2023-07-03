@@ -192,6 +192,8 @@ impl NetworkBehaviour for Behaviour {
 
                 self.external_address.insert(addr.clone());
 
+                log::info!("Discovered {addr} as an external address.");
+
                 self.events
                     .push_back(ToSwarm::ExternalAddrConfirmed(addr.clone()));
             }
@@ -206,6 +208,20 @@ impl NetworkBehaviour for Behaviour {
                 if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id) {
                     let list = entry.get_mut();
                     list.remove(addr);
+
+                    let (tx, rx) = oneshot::channel();
+
+                    let _ =
+                        self.nat_sender
+                            .clone()
+                            .unbounded_send(NatCommands::DisableForwardPort(
+                                addr.clone(),
+                                NatType::Igd,
+                                tx,
+                            ));
+
+                    self.disable_futures.push(rx.boxed());
+
                     if list.is_empty() {
                         entry.remove();
                     }
@@ -226,13 +242,11 @@ impl NetworkBehaviour for Behaviour {
 
         loop {
             match self.disable_futures.poll_next_unpin(cx) {
-                Poll::Ready(Some(result)) => match result {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => {
-                        log::error!("Error disabling port forwarding: {e}");
-                    }
-                    Err(_) => log::error!("Channel has dropped"),
-                },
+                Poll::Ready(Some(Ok(Ok(_)))) => {}
+                Poll::Ready(Some(Ok(Err(e)))) => {
+                    log::error!("Error disabling port forwarding: {e}")
+                }
+                Poll::Ready(Some(Err(_))) => log::error!("Channel has dropped"),
                 Poll::Ready(None) => break,
                 Poll::Pending => break,
             }
@@ -272,7 +286,7 @@ impl NetworkBehaviour for Behaviour {
                                     }
                                 }
                             }
-                            Ok(Err(_)) => {}
+                            Ok(Err(e)) => log::error!("Error: {e}"),
                             Err(_) => {
                                 log::error!("Channel has dropped");
                             }
