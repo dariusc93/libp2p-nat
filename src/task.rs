@@ -212,6 +212,7 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                                 continue;
                             }
                         };
+
                         if let Err(e) = handler.send_public_address_request().await {
                             let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))));
                             continue;
