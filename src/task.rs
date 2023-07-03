@@ -74,25 +74,7 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
     let (result_tx, result_rx) = oneshot::channel::<anyhow::Result<UnboundedSender<NatCommands>>>();
 
     let fut = async move {
-        #[cfg(all(feature = "tokio", feature = "nat_pmp_fallback"))]
-        #[cfg(not(target_os = "ios"))]
-        let nat_handle = match natpmp::new_tokio_natpmp().await {
-            Ok(handle) => std::sync::Arc::new(handle),
-            Err(e) => {
-                let _ = result_tx.send(Err(anyhow::Error::from(e)));
-                return;
-            }
-        };
 
-        #[cfg(all(feature = "async-std", feature = "nat_pmp_fallback"))]
-        #[cfg(not(target_os = "ios"))]
-        let nat_handle = match natpmp::new_async_std_natpmp().await {
-            Ok(handle) => std::sync::Arc::new(handle),
-            Err(e) => {
-                let _ = result_tx.send(Err(anyhow::Error::from(e)));
-                return;
-            }
-        };
 
         let _ = result_tx.send(Ok(tx));
 
@@ -148,6 +130,24 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                     #[cfg(feature = "nat_pmp_fallback")]
                     #[cfg(not(target_os = "ios"))]
                     {
+                        #[cfg(all(feature = "tokio"))]
+                        let nat_handle = match natpmp::new_tokio_natpmp().await {
+                            Ok(handle) => handle,
+                            Err(e) => {
+                                let _ = result_tx.send(Err(anyhow::Error::from(e)));
+                                return;
+                            }
+                        };
+                
+                        #[cfg(all(feature = "async-std"))]
+                        let nat_handle = match natpmp::new_async_std_natpmp().await {
+                            Ok(handle) => handle,
+                            Err(e) => {
+                                let _ = result_tx.send(Err(anyhow::Error::from(e)));
+                                return;
+                            }
+                        };
+
                         // In case igd fails, we will attempt with nat-pmp before returning an error
                         // TODO: Determine if we should have it in separate events
                         if let Err(e) = nat_handle
@@ -183,24 +183,6 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                             ))));
                             continue;
                         }
-
-                        #[cfg(feature = "tokio")]
-                        let mut handler = match natpmp::new_tokio_natpmp().await {
-                            Ok(n) => n,
-                            Err(e) => {
-                                let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))));
-                                continue;
-                            }
-                        };
-
-                        #[cfg(feature = "async-std")]
-                        let mut handler = match natpmp::new_async_std_natpmp().await {
-                            Ok(n) => n,
-                            Err(e) => {
-                                let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))));
-                                continue;
-                            }
-                        };
 
                         if let Err(e) = handler.send_public_address_request().await {
                             let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))));
