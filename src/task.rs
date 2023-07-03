@@ -74,8 +74,6 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
     let (result_tx, result_rx) = oneshot::channel::<anyhow::Result<UnboundedSender<NatCommands>>>();
 
     let fut = async move {
-
-
         let _ = result_tx.send(Ok(tx));
 
         while let Some(cmd) = rx.next().await {
@@ -87,12 +85,8 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                     };
 
                     let igd_fut = async {
-                        let opts = SearchOptions {
-                            timeout: Some(Duration::from_secs(2)),
-                            ..Default::default()
-                        };
 
-                        let gateway = aio::search_gateway(opts).await?;
+                        let gateway = aio::search_gateway(SearchOptions::default()).await?;
 
                         gateway
                             .add_port(
@@ -131,20 +125,22 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                     #[cfg(not(target_os = "ios"))]
                     {
                         #[cfg(all(feature = "tokio"))]
-                        let nat_handle = match natpmp::new_tokio_natpmp().await {
+                        let mut nat_handle = match natpmp::new_tokio_natpmp().await {
                             Ok(handle) => handle,
                             Err(e) => {
-                                let _ = result_tx.send(Err(anyhow::Error::from(e)));
-                                return;
+                                log::error!("Error obtaining nat-pmp handle: {e}");
+                                let _ = res.send(Err(ForwardingError::PortForwardingFailed));
+                                continue;
                             }
                         };
-                
+
                         #[cfg(all(feature = "async-std"))]
-                        let nat_handle = match natpmp::new_async_std_natpmp().await {
+                        let mut nat_handle = match natpmp::new_async_std_natpmp().await {
                             Ok(handle) => handle,
                             Err(e) => {
-                                let _ = result_tx.send(Err(anyhow::Error::from(e)));
-                                return;
+                                log::error!("Error obtaining nat-pmp handle: {e}");
+                                let _ = res.send(Err(ForwardingError::PortForwardingFailed));
+                                continue;
                             }
                         };
 
@@ -159,7 +155,7 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                             )
                             .await
                         {
-                            log::error!("Error port mapping: {e}");
+                            log::error!("Error opening port with nat-pmp: {e}");
                             let _ = res.send(Err(ForwardingError::PortForwardingFailed));
                             continue;
                         }
@@ -184,12 +180,12 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                             continue;
                         }
 
-                        if let Err(e) = handler.send_public_address_request().await {
+                        if let Err(e) = nat_handle.send_public_address_request().await {
                             let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))));
                             continue;
                         }
 
-                        let gateway = match handler.read_response_or_retry().await {
+                        let gateway = match nat_handle.read_response_or_retry().await {
                             Ok(natpmp::Response::Gateway(gr)) => gr,
                             Ok(_) => {
                                 let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!(
@@ -205,14 +201,8 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                             }
                         };
 
-                        let multi_proto = Protocol::Ip4(*gateway.public_address());
-                        let multiaddr = multiaddr
-                            .iter()
-                            .map(|p| match p {
-                                Protocol::Ip4(_) => multi_proto.clone(),
-                                p => p,
-                            })
-                            .collect();
+                        let ext_addr = *gateway.public_address();
+                        let multiaddr = to_multipaddr((ext_addr, addr.port()), protocol, qty);
 
                         let _ = res.send(Ok((multiaddr, NatType::Natpmp)));
                     }
