@@ -74,10 +74,7 @@ async fn main() -> anyhow::Result<()> {
         }),
         nat: libp2p_nat::Behaviour::new().await?,
         relay_client,
-        kad: Toggle::from(Some({
-            let store = MemoryStore::new(local_peer_id);
-            Kademlia::new(local_peer_id, store)
-        })),
+        kad: Toggle::from(None),
         notifier: ext_behaviour::Behaviour::default(),
     };
 
