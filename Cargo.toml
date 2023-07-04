@@ -29,11 +29,15 @@ wasm-timer = "0.2"
 thiserror = "1"
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
-natpmp = { version = "0.4", default-features = false, optional = true}
+natpmp = { version = "0.4", default-features = false, optional = true }
 
 [dev-dependencies]
 libp2p = { version = "0.52", features = ["full"] }
-libp2p-quic = { version = "0.8.0-alpha", features = ["async-std"]}
+libp2p-quic = { version = "0.8.0-alpha", features = ["async-std"] }
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 env_logger = "0.10"
+
+[patch.crates-io]
+libp2p = { version = "0.52", git = "https://github.com/libp2p/rust-libp2p/", rev = "cbb9c7c0f392b78a61c43a1b876ed5d89b101634" }
+libp2p-quic = { version = "0.8.0-alpha", git = "https://github.com/libp2p/rust-libp2p/", rev = "cbb9c7c0f392b78a61c43a1b876ed5d89b101634" }
