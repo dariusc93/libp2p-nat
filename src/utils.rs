@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4, Ipv4Addr, Ipv6Addr};
 
 use igd_next::PortMappingProtocol;
 use libp2p::{multiaddr::Protocol, Multiaddr};
@@ -62,13 +62,13 @@ pub(crate) fn multiaddr_to_socket_port(
             Protocol::Ip4(addr) if addr.is_private() => {
                 Some(SocketAddr::V4(SocketAddrV4::new(addr, 0)))
             }
-            Protocol::Ip6(addr)
-                if !addr.is_loopback()
-                    && (addr.segments()[0] & 0xffc0) != 0xfe80
-                    && (addr.segments()[0] & 0xfe00) != 0xfc00 =>
-            {
-                Some(SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)))
-            }
+            // Protocol::Ip6(addr)
+            //     if !addr.is_loopback()
+            //         && (addr.segments()[0] & 0xffc0) != 0xfe80
+            //         && (addr.segments()[0] & 0xfe00) != 0xfc00 =>
+            // {
+            //     Some(SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)))
+            // }
             _ => None,
         }) else { return None };
 
