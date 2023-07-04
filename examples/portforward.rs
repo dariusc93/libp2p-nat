@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
             config.push_listen_addr_updates = true;
             config
         }),
-        nat: libp2p_nat::Behaviour::new().await?,
+        nat: libp2p_nat::Behaviour::default(),
         relay_client,
         kad: Toggle::from(None),
         notifier: ext_behaviour::Behaviour::default(),

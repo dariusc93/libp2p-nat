@@ -67,15 +67,12 @@ impl From<QuicType> for Protocol<'_> {
 
 #[inline]
 #[cfg(any(feature = "tokio", feature = "async-std"))]
-pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
+pub fn port_forwarding_task() -> UnboundedSender<NatCommands> {
     use crate::utils::to_multipaddr;
 
     let (tx, mut rx) = unbounded();
-    let (result_tx, result_rx) = oneshot::channel::<anyhow::Result<UnboundedSender<NatCommands>>>();
 
     let fut = async move {
-        let _ = result_tx.send(Ok(tx));
-
         while let Some(cmd) = rx.next().await {
             match cmd {
                 NatCommands::ForwardPort(multiaddr, duration, res) => {
@@ -85,7 +82,6 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                     };
 
                     let igd_fut = async {
-
                         let gateway = aio::search_gateway(SearchOptions::default()).await?;
 
                         gateway
@@ -251,5 +247,5 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
     #[cfg(feature = "async-std")]
     async_std::task::spawn(fut);
 
-    result_rx.await?
+    tx
 }

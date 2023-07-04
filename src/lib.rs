@@ -47,18 +47,19 @@ pub struct Behaviour {
     disabled: bool,
 }
 
-impl Behaviour {
-    pub async fn new() -> anyhow::Result<Self> {
-        Self::with_duration(Duration::from_secs(2 * 60)).await
+impl Default for Behaviour {
+    fn default() -> Self {
+        Self::with_duration(Duration::from_secs(2 * 60))
     }
+}
 
-    pub async fn with_duration(duration: Duration) -> anyhow::Result<Self> {
-        if duration.as_secs() < 60 {
-            anyhow::bail!("Duration must be 60 seconds or more");
-        }
+impl Behaviour {
+
+    pub fn with_duration(duration: Duration) -> Self {
+        assert!(duration.as_secs() > 10);
         let renewal = duration / 2;
-        let nat_sender = task::port_forwarding_task().await?;
-        Ok(Self {
+        let nat_sender = task::port_forwarding_task();
+        Self {
             events: Default::default(),
             nat_sender,
             futures: Default::default(),
@@ -69,7 +70,7 @@ impl Behaviour {
             external_address: Default::default(),
             pending_external_address: Default::default(),
             disabled: false,
-        })
+        }
     }
 
     /// Enables port forwarding
