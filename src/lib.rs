@@ -309,6 +309,8 @@ impl NetworkBehaviour for Behaviour {
             }
         }
 
+        self.waker = Some(cx.waker().clone());
+
         Poll::Pending
     }
 }
