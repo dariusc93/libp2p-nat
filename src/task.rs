@@ -24,8 +24,11 @@ pub enum ForwardingError {
     },
     #[error("Unable to port forward")]
     PortForwardingFailed { listener_id: ListenerId },
-    #[error(transparent)]
-    Any(anyhow::Error),
+    #[error("Error")]
+    Any {
+        listener_id: ListenerId,
+        error: anyhow::Error,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +83,6 @@ pub fn port_forwarding_task(
     UnboundedSender<NatCommands>,
     Receiver<Result<NatResult, ForwardingError>>,
 ) {
-    
     use futures::{channel::mpsc::channel, SinkExt};
     use futures_timer::Delay;
 
@@ -137,7 +139,11 @@ pub fn port_forwarding_task(
 
                     #[cfg(any(target_os = "ios", not(feature = "nat_pmp_fallback")))]
                     {
-                        let _ = res.send(Err(ForwardingError::PortForwardingFailed { listener_id: id })).await;
+                        let _ = res
+                            .send(Err(ForwardingError::PortForwardingFailed {
+                                listener_id: id,
+                            }))
+                            .await;
                         continue;
                     }
 
@@ -149,7 +155,11 @@ pub fn port_forwarding_task(
                             Ok(handle) => handle,
                             Err(e) => {
                                 log::error!("Error obtaining nat-pmp handle: {e}");
-                                let _ = res.send(Err(ForwardingError::PortForwardingFailed { listener_id: id })).await;
+                                let _ = res
+                                    .send(Err(ForwardingError::PortForwardingFailed {
+                                        listener_id: id,
+                                    }))
+                                    .await;
                                 continue;
                             }
                         };
@@ -159,7 +169,11 @@ pub fn port_forwarding_task(
                             Ok(handle) => handle,
                             Err(e) => {
                                 log::error!("Error obtaining nat-pmp handle: {e}");
-                                let _ = res.send(Err(ForwardingError::PortForwardingFailed { listener_id: id })).await;
+                                let _ = res
+                                    .send(Err(ForwardingError::PortForwardingFailed {
+                                        listener_id: id,
+                                    }))
+                                    .await;
                                 continue;
                             }
                         };
@@ -176,7 +190,11 @@ pub fn port_forwarding_task(
                             .await
                         {
                             log::error!("Error opening port with nat-pmp: {e}");
-                            let _ = res.send(Err(ForwardingError::PortForwardingFailed { listener_id: id })).await;
+                            let _ = res
+                                .send(Err(ForwardingError::PortForwardingFailed {
+                                    listener_id: id,
+                                }))
+                                .await;
                             continue;
                         }
 
@@ -184,9 +202,10 @@ pub fn port_forwarding_task(
                             Ok(response) => response,
                             Err(e) => {
                                 let _ = res
-                                    .send(Err(ForwardingError::Any(anyhow::anyhow!(
-                                        "Error with nat pmp: {e}"
-                                    ))))
+                                    .send(Err(ForwardingError::Any {
+                                        listener_id: id,
+                                        error: anyhow::anyhow!("Error with nat pmp: {e}"),
+                                    }))
                                     .await;
                                 continue;
                             }
@@ -197,16 +216,20 @@ pub fn port_forwarding_task(
                             natpmp::Response::TCP(_) | natpmp::Response::UDP(_)
                         ) {
                             let _ = res
-                                .send(Err(ForwardingError::Any(anyhow::anyhow!(
-                                    "Unsupported result"
-                                ))))
+                                .send(Err(ForwardingError::Any {
+                                    listener_id: id,
+                                    error: anyhow::anyhow!("Unsupported result"),
+                                }))
                                 .await;
                             continue;
                         }
 
                         if let Err(e) = nat_handle.send_public_address_request().await {
                             let _ = res
-                                .send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))))
+                                .send(Err(ForwardingError::Any {
+                                    listener_id: id,
+                                    error: anyhow::anyhow!("error sending request: {e}"),
+                                }))
                                 .await;
                             continue;
                         }
@@ -215,17 +238,19 @@ pub fn port_forwarding_task(
                             Ok(natpmp::Response::Gateway(gr)) => gr,
                             Ok(_) => {
                                 let _ = res
-                                    .send(Err(ForwardingError::Any(anyhow::anyhow!(
-                                        "Cannot get external address"
-                                    ))))
+                                    .send(Err(ForwardingError::Any {
+                                        listener_id: id,
+                                        error: anyhow::anyhow!("Cannot get external address"),
+                                    }))
                                     .await;
                                 continue;
                             }
                             Err(e) => {
                                 let _ = res
-                                    .send(Err(ForwardingError::Any(anyhow::anyhow!(
-                                        "Error with nat pmp: {e}"
-                                    ))))
+                                    .send(Err(ForwardingError::Any {
+                                        listener_id: id,
+                                        error: anyhow::anyhow!("Error with nat pmp: {e}"),
+                                    }))
                                     .await;
                                 continue;
                             }
@@ -260,7 +285,10 @@ pub fn port_forwarding_task(
                         Err(e) => {
                             log::warn!("Error with igd: {e}");
                             let _ = res
-                                .send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))))
+                                .send(Err(ForwardingError::Any {
+                                    listener_id: id,
+                                    error: anyhow::anyhow!("{e}"),
+                                }))
                                 .await;
                             continue;
                         }
@@ -270,19 +298,25 @@ pub fn port_forwarding_task(
                         .remove_port(protocol.into(), addr.port())
                         .await
                         .map(|_| NatResult::PortForwardingDisabled { listener_id: id })
-                        .map_err(|e| ForwardingError::Any(anyhow::anyhow!("{e}")));
+                        .map_err(|e| ForwardingError::Any {
+                            listener_id: id,
+                            error: anyhow::anyhow!("{e}"),
+                        });
 
                     let _ = res.send(result).await;
                 }
 
                 #[cfg(feature = "nat_pmp_fallback")]
                 #[cfg(not(target_os = "ios"))]
-                NatCommands::DisableForwardPort(_, _, NatType::Natpmp) => {
+                NatCommands::DisableForwardPort(id, _, NatType::Natpmp) => {
                     //This implementation does not have a way to remove the port at this time
                     let _ = res
-                        .send(Err(ForwardingError::Any(anyhow::anyhow!(
-                            "cannot disable port forwarding via nat-pmp at this time"
-                        ))))
+                        .send(Err(ForwardingError::Any {
+                            listener_id: id,
+                            error: anyhow::anyhow!(
+                                "cannot disable port forwarding via nat-pmp at this time"
+                            ),
+                        }))
                         .await;
                 }
             }

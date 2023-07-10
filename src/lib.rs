@@ -227,13 +227,14 @@ impl NetworkBehaviour for Behaviour {
 
         for (id, local_listener) in &mut self.local_listeners {
             if let Some(renewal) = local_listener.renewal.as_mut() {
-                while let Poll::Ready(()) = renewal.poll_unpin(cx) {
+                if let Poll::Ready(()) = renewal.poll_unpin(cx) {
                     for addr in &local_listener.addrs {
                         let _ = self
                             .nat_sender
                             .clone()
                             .unbounded_send(NatCommands::ForwardPort(*id, addr.clone()));
                     }
+                    renewal.reset(Duration::from_secs(30));
                 }
             }
         }
@@ -280,17 +281,27 @@ impl NetworkBehaviour for Behaviour {
                             let listener = entry.get_mut();
                             log::debug!("Removing {address} from local listeners");
                             listener.addrs.retain(|local_addr| local_addr != &address);
+                            listener.renewal = Some(Delay::new(Duration::from_secs(30)));
                         }
                     }
                     Err(ForwardingError::PortForwardingFailed { listener_id }) => {
                         if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id)
                         {
+                            log::error!("Failed performing port forwarding");
                             let listener = entry.get_mut();
                             listener.renewal = Some(Delay::new(Duration::from_secs(30)));
                         }
                     }
-                    Err(ForwardingError::Any(e)) => {
+                    Err(ForwardingError::Any {
+                        listener_id,
+                        error: e,
+                    }) => {
                         log::error!("Error: {e}");
+                        if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id)
+                        {
+                            let listener = entry.get_mut();
+                            listener.renewal = Some(Delay::new(Duration::from_secs(30)));
+                        }
                     }
                 },
                 Poll::Ready(None) => unreachable!("Channels are owned"),
