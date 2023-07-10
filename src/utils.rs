@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr, SocketAddrV4, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 
 use igd_next::PortMappingProtocol;
 use libp2p::{multiaddr::Protocol, Multiaddr};
