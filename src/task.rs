@@ -3,26 +3,27 @@
 use std::time::Duration;
 
 use futures::{
-    channel::{
-        mpsc::{unbounded, UnboundedSender},
-        oneshot,
-    },
+    channel::mpsc::{unbounded, Receiver, UnboundedSender},
     StreamExt,
 };
+
 #[cfg(any(feature = "tokio", feature = "async-std"))]
 use igd_next::aio;
 
 use igd_next::SearchOptions;
-use libp2p::{multiaddr::Protocol, Multiaddr};
+use libp2p::{multiaddr::Protocol, swarm::derive_prelude::ListenerId, Multiaddr};
 
 use crate::utils::multiaddr_to_socket_port;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ForwardingError {
     #[error("Address provided is either local or invalid")]
-    InvalidAddress { address: Multiaddr },
+    InvalidAddress {
+        listener_id: ListenerId,
+        address: Multiaddr,
+    },
     #[error("Unable to port forward")]
-    PortForwardingFailed,
+    PortForwardingFailed { listener_id: ListenerId },
     #[error(transparent)]
     Any(anyhow::Error),
 }
@@ -38,16 +39,21 @@ pub enum NatType {
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum NatCommands {
-    ForwardPort(
-        Multiaddr,
-        Duration,
-        oneshot::Sender<Result<(Multiaddr, NatType), ForwardingError>>,
-    ),
-    DisableForwardPort(
-        Multiaddr,
-        NatType,
-        oneshot::Sender<Result<(), ForwardingError>>,
-    ),
+    ForwardPort(ListenerId, Multiaddr),
+    DisableForwardPort(ListenerId, Multiaddr, NatType),
+}
+
+#[derive(Debug)]
+pub enum NatResult {
+    PortForwardingEnabled {
+        listener_id: ListenerId,
+        addr: Multiaddr,
+        nat_type: NatType,
+        timer: futures_timer::Delay,
+    },
+    PortForwardingDisabled {
+        listener_id: ListenerId,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,17 +73,28 @@ impl From<QuicType> for Protocol<'_> {
 
 #[inline]
 #[cfg(any(feature = "tokio", feature = "async-std"))]
-pub fn port_forwarding_task() -> UnboundedSender<NatCommands> {
+pub fn port_forwarding_task(
+    renewal: Duration,
+    duration: Duration,
+) -> (
+    UnboundedSender<NatCommands>,
+    Receiver<Result<NatResult, ForwardingError>>,
+) {
+    
+    use futures::{channel::mpsc::channel, SinkExt};
+    use futures_timer::Delay;
+
     use crate::utils::to_multipaddr;
 
+    let (mut res, res_rx) = channel(20);
     let (tx, mut rx) = unbounded();
 
     let fut = async move {
         while let Some(cmd) = rx.next().await {
             match cmd {
-                NatCommands::ForwardPort(multiaddr, duration, res) => {
+                NatCommands::ForwardPort(id, multiaddr) => {
                     let Some((addr, protocol, qty)) = multiaddr_to_socket_port(&multiaddr) else {
-                        let _ = res.send(Err(ForwardingError::InvalidAddress{ address: multiaddr }));
+                        let _ = res.clone().send(Err(ForwardingError::InvalidAddress{ listener_id: id, address: multiaddr })).await;
                         continue;
                     };
 
@@ -103,7 +120,14 @@ pub fn port_forwarding_task() -> UnboundedSender<NatCommands> {
 
                     match igd_fut.await {
                         Ok(addr) => {
-                            let _ = res.send(Ok((addr, NatType::Igd)));
+                            let _ = res
+                                .send(Ok(NatResult::PortForwardingEnabled {
+                                    listener_id: id,
+                                    addr,
+                                    nat_type: NatType::Igd,
+                                    timer: Delay::new(renewal),
+                                }))
+                                .await;
                             continue;
                         }
                         Err(e) => {
@@ -113,7 +137,7 @@ pub fn port_forwarding_task() -> UnboundedSender<NatCommands> {
 
                     #[cfg(any(target_os = "ios", not(feature = "nat_pmp_fallback")))]
                     {
-                        let _ = res.send(Err(ForwardingError::PortForwardingFailed));
+                        let _ = res.send(Err(ForwardingError::PortForwardingFailed { listener_id: id })).await;
                         continue;
                     }
 
@@ -125,7 +149,7 @@ pub fn port_forwarding_task() -> UnboundedSender<NatCommands> {
                             Ok(handle) => handle,
                             Err(e) => {
                                 log::error!("Error obtaining nat-pmp handle: {e}");
-                                let _ = res.send(Err(ForwardingError::PortForwardingFailed));
+                                let _ = res.send(Err(ForwardingError::PortForwardingFailed { listener_id: id })).await;
                                 continue;
                             }
                         };
@@ -135,7 +159,7 @@ pub fn port_forwarding_task() -> UnboundedSender<NatCommands> {
                             Ok(handle) => handle,
                             Err(e) => {
                                 log::error!("Error obtaining nat-pmp handle: {e}");
-                                let _ = res.send(Err(ForwardingError::PortForwardingFailed));
+                                let _ = res.send(Err(ForwardingError::PortForwardingFailed { listener_id: id })).await;
                                 continue;
                             }
                         };
@@ -152,16 +176,18 @@ pub fn port_forwarding_task() -> UnboundedSender<NatCommands> {
                             .await
                         {
                             log::error!("Error opening port with nat-pmp: {e}");
-                            let _ = res.send(Err(ForwardingError::PortForwardingFailed));
+                            let _ = res.send(Err(ForwardingError::PortForwardingFailed { listener_id: id })).await;
                             continue;
                         }
 
                         let response = match nat_handle.read_response_or_retry().await {
                             Ok(response) => response,
                             Err(e) => {
-                                let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!(
-                                    "Error with nat pmp: {e}"
-                                ))));
+                                let _ = res
+                                    .send(Err(ForwardingError::Any(anyhow::anyhow!(
+                                        "Error with nat pmp: {e}"
+                                    ))))
+                                    .await;
                                 continue;
                             }
                         };
@@ -170,42 +196,57 @@ pub fn port_forwarding_task() -> UnboundedSender<NatCommands> {
                             response,
                             natpmp::Response::TCP(_) | natpmp::Response::UDP(_)
                         ) {
-                            let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!(
-                                "Unsupported result"
-                            ))));
+                            let _ = res
+                                .send(Err(ForwardingError::Any(anyhow::anyhow!(
+                                    "Unsupported result"
+                                ))))
+                                .await;
                             continue;
                         }
 
                         if let Err(e) = nat_handle.send_public_address_request().await {
-                            let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))));
+                            let _ = res
+                                .send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))))
+                                .await;
                             continue;
                         }
 
                         let gateway = match nat_handle.read_response_or_retry().await {
                             Ok(natpmp::Response::Gateway(gr)) => gr,
                             Ok(_) => {
-                                let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!(
-                                    "Cannot get external address"
-                                ))));
+                                let _ = res
+                                    .send(Err(ForwardingError::Any(anyhow::anyhow!(
+                                        "Cannot get external address"
+                                    ))))
+                                    .await;
                                 continue;
                             }
                             Err(e) => {
-                                let _ = res.send(Err(ForwardingError::Any(anyhow::anyhow!(
-                                    "Error with nat pmp: {e}"
-                                ))));
+                                let _ = res
+                                    .send(Err(ForwardingError::Any(anyhow::anyhow!(
+                                        "Error with nat pmp: {e}"
+                                    ))))
+                                    .await;
                                 continue;
                             }
                         };
 
                         let ext_addr = *gateway.public_address();
-                        let multiaddr = to_multipaddr((ext_addr, addr.port()), protocol, qty);
+                        let addr = to_multipaddr((ext_addr, addr.port()), protocol, qty);
 
-                        let _ = res.send(Ok((multiaddr, NatType::Natpmp)));
+                        let _ = res
+                            .send(Ok(NatResult::PortForwardingEnabled {
+                                listener_id: id,
+                                addr,
+                                nat_type: NatType::Natpmp,
+                                timer: Delay::new(renewal),
+                            }))
+                            .await;
                     }
                 }
-                NatCommands::DisableForwardPort(addr, NatType::Igd, ret) => {
+                NatCommands::DisableForwardPort(id, addr, NatType::Igd) => {
                     let Some((addr, protocol, _)) = multiaddr_to_socket_port(&addr) else {
-                        let _ = ret.send(Err(ForwardingError::InvalidAddress{ address: addr }));
+                        let _ = res.send(Err(ForwardingError::InvalidAddress{ listener_id: id, address: addr })).await;
                         continue;
                     };
 
@@ -218,24 +259,31 @@ pub fn port_forwarding_task() -> UnboundedSender<NatCommands> {
                         Ok(gateway) => gateway,
                         Err(e) => {
                             log::warn!("Error with igd: {e}");
-                            let _ = ret.send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))));
+                            let _ = res
+                                .send(Err(ForwardingError::Any(anyhow::anyhow!("{e}"))))
+                                .await;
                             continue;
                         }
                     };
 
-                    let _ = ret.send(
-                        gateway
-                            .remove_port(protocol.into(), addr.port())
-                            .await
-                            .map_err(|e| ForwardingError::Any(anyhow::anyhow!("{e}"))),
-                    );
+                    let result = gateway
+                        .remove_port(protocol.into(), addr.port())
+                        .await
+                        .map(|_| NatResult::PortForwardingDisabled { listener_id: id })
+                        .map_err(|e| ForwardingError::Any(anyhow::anyhow!("{e}")));
+
+                    let _ = res.send(result).await;
                 }
 
                 #[cfg(feature = "nat_pmp_fallback")]
                 #[cfg(not(target_os = "ios"))]
-                NatCommands::DisableForwardPort(_, NatType::Natpmp, ret) => {
+                NatCommands::DisableForwardPort(_, _, NatType::Natpmp) => {
                     //This implementation does not have a way to remove the port at this time
-                    let _ = ret.send(Ok(()));
+                    let _ = res
+                        .send(Err(ForwardingError::Any(anyhow::anyhow!(
+                            "cannot disable port forwarding via nat-pmp at this time"
+                        ))))
+                        .await;
                 }
             }
         }
@@ -247,5 +295,5 @@ pub fn port_forwarding_task() -> UnboundedSender<NatCommands> {
     #[cfg(feature = "async-std")]
     async_std::task::spawn(fut);
 
-    tx
+    (tx, res_rx)
 }
