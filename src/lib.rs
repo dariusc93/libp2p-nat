@@ -10,15 +10,16 @@ use libp2p::swarm::{
     self, dummy::ConnectionHandler as DummyConnectionHandler, NetworkBehaviour, PollParameters,
 };
 use libp2p::swarm::{
-    ConnectionDenied, ConnectionId, ExpiredListenAddr, ExternalAddrExpired,
-    NewExternalAddrCandidate, NewListenAddr, THandler, THandlerInEvent, ToSwarm,
+    ConnectionDenied, ConnectionId, ExpiredListenAddr, NewListenAddr, THandler, THandlerInEvent,
+    ToSwarm,
 };
 use libp2p::PeerId;
 use std::collections::hash_map::Entry;
+use std::task::Waker;
 use std::time::Duration;
 use task::{ForwardingError, NatCommands, NatResult, NatType};
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 #[cfg(not(any(feature = "tokio", feature = "async-std")))]
 compile_error!("Require tokio or async-std feature to be enabled");
@@ -35,10 +36,9 @@ pub struct Behaviour {
     events: VecDeque<swarm::ToSwarm<<Self as NetworkBehaviour>::ToSwarm, THandlerInEvent<Self>>>,
     nat_sender: futures::channel::mpsc::UnboundedSender<NatCommands>,
     event_receiver: futures::channel::mpsc::Receiver<Result<NatResult, ForwardingError>>,
-    external_address: HashSet<Multiaddr>,
-    pending_external_address: HashSet<Multiaddr>,
     local_listeners: HashMap<ListenerId, LocalListener>,
     disabled: bool,
+    waker: Option<Waker>,
 }
 
 impl Default for Behaviour {
@@ -58,15 +58,20 @@ impl Behaviour {
             nat_sender,
             event_receiver: result_rx,
             local_listeners: Default::default(),
-            external_address: Default::default(),
-            pending_external_address: Default::default(),
             disabled: false,
+            waker: None,
         }
     }
 
     /// Enables port forwarding
     pub fn enable(&mut self) {
         self.disabled = false;
+        for local_listener in self.local_listeners.values_mut() {
+            local_listener.renewal = Some(Delay::new(Duration::from_secs(10)));
+        }
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
     }
 
     /// Disable port forwarding
@@ -79,7 +84,7 @@ impl Behaviour {
         self.disabled = true;
 
         // No need to continue if there are no external addresses
-        if self.external_address.is_empty() {
+        if self.external_addr().is_empty() {
             return;
         }
 
@@ -94,18 +99,27 @@ impl Behaviour {
                         NatType::Igd,
                     ));
             }
+
+            // Notify swarm about the external addresses expiring
+            // Regardless of if we successfully disable port forwarding in the background task
+            for addr in listener.external_addrs.drain(..) {
+                self.events.push_back(ToSwarm::ExternalAddrExpired(addr));
+            }
+
+            listener.renewal = None;
         }
 
-        // Notify swarm about the external addresses expiring
-        // Regardless of if we successfully disable port forwarding in the background task
-        for addr in self.external_address.drain() {
-            self.events.push_back(ToSwarm::ExternalAddrExpired(addr));
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
         }
     }
 
     /// Gets external addresses
     pub fn external_addr(&self) -> Vec<Multiaddr> {
-        Vec::from_iter(self.external_address.iter().cloned())
+        self.local_listeners
+            .values()
+            .flat_map(|local| local.addrs.clone())
+            .collect::<Vec<_>>()
     }
 }
 
@@ -170,33 +184,8 @@ impl NetworkBehaviour for Behaviour {
                     .clone()
                     .unbounded_send(NatCommands::ForwardPort(listener_id, addr.clone()));
             }
-            swarm::FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate { addr }) => {
-                if !self.pending_external_address.remove(addr) {
-                    return;
-                }
-
-                if self.disabled {
-                    return;
-                }
-
-                if self.external_address.contains(addr) {
-                    return;
-                }
-
-                self.external_address.insert(addr.clone());
-
-                log::info!("Discovered {addr} as an external address.");
-
-                self.events
-                    .push_back(ToSwarm::ExternalAddrConfirmed(addr.clone()));
-            }
-            swarm::FromSwarm::ExternalAddrExpired(ExternalAddrExpired { addr }) => {
-                if !self.external_address.contains(addr) {
-                    return;
-                }
-
-                self.external_address.remove(addr);
-            }
+            swarm::FromSwarm::NewExternalAddrCandidate(_) => {}
+            swarm::FromSwarm::ExternalAddrExpired(_) => {}
             swarm::FromSwarm::ExpiredListenAddr(ExpiredListenAddr { listener_id, addr }) => {
                 if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id) {
                     let listener = entry.get_mut();
@@ -262,18 +251,20 @@ impl NetworkBehaviour for Behaviour {
                         {
                             let listener = entry.get_mut();
                             if !listener.external_addrs.contains(&addr) {
-                                self.pending_external_address.insert(addr.clone());
+                                log::info!("Discovered {addr} as an external address.");
+                                listener.external_addrs.push(addr.clone());
                                 self.events
-                                    .push_back(ToSwarm::NewExternalAddrCandidate(addr.clone()));
+                                    .push_back(ToSwarm::ExternalAddrConfirmed(addr.clone()));
                             }
                             listener.renewal = Some(timer);
                         }
                     }
                     Ok(NatResult::PortForwardingDisabled { listener_id }) => {
-                        if let Entry::Occupied(entry) = self.local_listeners.entry(listener_id) {
-                            let listener = entry.get();
+                        if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id)
+                        {
+                            let listener = entry.get_mut();
                             if !listener.external_addrs.is_empty() {
-                                for addr in &self.external_address {
+                                for addr in listener.external_addrs.drain(..) {
                                     self.events
                                         .push_back(ToSwarm::ExternalAddrExpired(addr.clone()));
                                 }
@@ -292,10 +283,10 @@ impl NetworkBehaviour for Behaviour {
                         }
                     }
                     Err(ForwardingError::PortForwardingFailed { listener_id }) => {
-                        if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id) {
+                        if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id)
+                        {
                             let listener = entry.get_mut();
                             listener.renewal = Some(Delay::new(Duration::from_secs(30)));
-                            
                         }
                     }
                     Err(ForwardingError::Any(e)) => {
