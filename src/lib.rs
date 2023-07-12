@@ -26,7 +26,7 @@ compile_error!("Require tokio or async-std feature to be enabled");
 
 #[derive(Debug)]
 struct LocalListener {
-    pub addrs: Vec<Multiaddr>,
+    pub addrs: HashMap<Multiaddr, Option<NatType>>,
     pub external_addrs: Vec<Multiaddr>,
     pub renewal: Option<Delay>,
 }
@@ -43,7 +43,7 @@ pub struct Behaviour {
 
 impl Default for Behaviour {
     fn default() -> Self {
-        Self::with_duration(Duration::from_secs(2 * 60))
+        Self::with_duration(Duration::from_secs(60))
     }
 }
 
@@ -89,14 +89,18 @@ impl Behaviour {
         }
 
         for (id, listener) in &mut self.local_listeners {
-            for addr in &listener.addrs {
+            for (addr, nat_type) in &listener.addrs {
+                let Some(nat_type) = nat_type else {
+                    continue;
+                };
+
                 let _ = self
                     .nat_sender
                     .clone()
                     .unbounded_send(NatCommands::DisableForwardPort(
                         *id,
                         addr.clone(),
-                        NatType::Igd,
+                        *nat_type,
                     ));
             }
 
@@ -118,7 +122,7 @@ impl Behaviour {
     pub fn external_addr(&self) -> Vec<Multiaddr> {
         self.local_listeners
             .values()
-            .flat_map(|local| local.addrs.clone())
+            .flat_map(|local| local.addrs.keys().cloned().collect::<Vec<_>>())
             .collect::<Vec<_>>()
     }
 }
@@ -166,13 +170,13 @@ impl NetworkBehaviour for Behaviour {
                 match self.local_listeners.entry(listener_id) {
                     Entry::Occupied(mut entry) => {
                         let listener = entry.get_mut();
-                        if !listener.addrs.contains(addr) {
-                            listener.addrs.push(addr.clone());
+                        if !listener.addrs.contains_key(addr) {
+                            listener.addrs.insert(addr.clone(), None);
                         }
                     }
                     Entry::Vacant(entry) => {
                         entry.insert(LocalListener {
-                            addrs: vec![addr.clone()],
+                            addrs: HashMap::from_iter([(addr.clone(), None)]),
                             external_addrs: vec![],
                             renewal: None,
                         });
@@ -192,20 +196,17 @@ impl NetworkBehaviour for Behaviour {
 
                     let list = &mut listener.addrs;
 
-                    if !list.contains(addr) {
+                    if !list.contains_key(addr) {
                         return;
                     }
 
-                    list.retain(|local_addr| local_addr != addr);
+                    let nat_type = list.remove(addr).flatten();
 
-                    let _ =
-                        self.nat_sender
-                            .clone()
-                            .unbounded_send(NatCommands::DisableForwardPort(
-                                listener_id,
-                                addr.clone(),
-                                NatType::Igd,
-                            ));
+                    if let Some(nat_type) = nat_type {
+                        let _ = self.nat_sender.clone().unbounded_send(
+                            NatCommands::DisableForwardPort(listener_id, addr.clone(), nat_type),
+                        );
+                    }
 
                     if list.is_empty() {
                         entry.remove();
@@ -228,7 +229,7 @@ impl NetworkBehaviour for Behaviour {
         for (id, local_listener) in &mut self.local_listeners {
             if let Some(renewal) = local_listener.renewal.as_mut() {
                 if let Poll::Ready(()) = renewal.poll_unpin(cx) {
-                    for addr in &local_listener.addrs {
+                    for addr in local_listener.addrs.keys() {
                         let _ = self
                             .nat_sender
                             .clone()
@@ -244,13 +245,20 @@ impl NetworkBehaviour for Behaviour {
                 Poll::Ready(Some(result)) => match result {
                     Ok(NatResult::PortForwardingEnabled {
                         listener_id,
+                        local_addr,
                         addr,
-                        nat_type: _,
+                        nat_type,
                         timer,
                     }) => {
                         if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id)
                         {
                             let listener = entry.get_mut();
+
+                            listener
+                                .addrs
+                                .entry(local_addr)
+                                .and_modify(|nty| *nty = Some(nat_type));
+
                             if !listener.external_addrs.contains(&addr) {
                                 log::info!("Discovered {addr} as an external address.");
                                 listener.external_addrs.push(addr.clone());
@@ -264,6 +272,9 @@ impl NetworkBehaviour for Behaviour {
                         if let Entry::Occupied(mut entry) = self.local_listeners.entry(listener_id)
                         {
                             let listener = entry.get_mut();
+
+                            listener.addrs.values_mut().for_each(|nty| *nty = None);
+
                             if !listener.external_addrs.is_empty() {
                                 for addr in listener.external_addrs.drain(..) {
                                     self.events
@@ -280,7 +291,7 @@ impl NetworkBehaviour for Behaviour {
                         {
                             let listener = entry.get_mut();
                             log::debug!("Removing {address} from local listeners");
-                            listener.addrs.retain(|local_addr| local_addr != &address);
+                            listener.addrs.retain(|local_addr, _| local_addr != &address);
                             listener.renewal = Some(Delay::new(Duration::from_secs(30)));
                         }
                     }
@@ -289,6 +300,12 @@ impl NetworkBehaviour for Behaviour {
                         {
                             log::error!("Failed performing port forwarding");
                             let listener = entry.get_mut();
+                            if !listener.external_addrs.is_empty() {
+                                for addr in listener.external_addrs.drain(..) {
+                                    self.events
+                                        .push_back(ToSwarm::ExternalAddrExpired(addr));
+                                }
+                            }
                             listener.renewal = Some(Delay::new(Duration::from_secs(30)));
                         }
                     }

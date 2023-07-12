@@ -50,6 +50,7 @@ pub enum NatCommands {
 pub enum NatResult {
     PortForwardingEnabled {
         listener_id: ListenerId,
+        local_addr: Multiaddr,
         addr: Multiaddr,
         nat_type: NatType,
         timer: futures_timer::Delay,
@@ -125,6 +126,7 @@ pub fn port_forwarding_task(
                             let _ = res
                                 .send(Ok(NatResult::PortForwardingEnabled {
                                     listener_id: id,
+                                    local_addr: multiaddr,
                                     addr,
                                     nat_type: NatType::Igd,
                                     timer: Delay::new(renewal),
@@ -262,6 +264,7 @@ pub fn port_forwarding_task(
                         let _ = res
                             .send(Ok(NatResult::PortForwardingEnabled {
                                 listener_id: id,
+                                local_addr: multiaddr,
                                 addr,
                                 nat_type: NatType::Natpmp,
                                 timer: Delay::new(renewal),
