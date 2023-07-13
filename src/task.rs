@@ -1,90 +1,185 @@
-//TODO: Use rust directly for port mapping natpmp (and eventually PCP) so we can avoid the need for FFI from natffi
+//TODO: Use rust directly for port mapping natpmp (and eventually PCP) so we can avoid the need for FFI from nat-pmp
 
-use std::{net::IpAddr, time::Duration};
+use std::time::Duration;
 
 use futures::{
-    channel::{
-        mpsc::{unbounded, UnboundedSender},
-        oneshot,
-    },
+    channel::mpsc::{unbounded, Receiver, UnboundedSender},
     StreamExt,
 };
+
 #[cfg(any(feature = "tokio", feature = "async-std"))]
 use igd_next::aio;
 
 use igd_next::SearchOptions;
-use libp2p::Multiaddr;
+use libp2p::{multiaddr::Protocol, swarm::derive_prelude::ListenerId, Multiaddr};
 
 use crate::utils::multiaddr_to_socket_port;
+
+#[derive(thiserror::Error, Debug)]
+pub enum ForwardingError {
+    #[error("Address provided is either local or invalid")]
+    InvalidAddress {
+        listener_id: ListenerId,
+        address: Multiaddr,
+    },
+    #[error("Unable to port forward")]
+    PortForwardingFailed { listener_id: ListenerId },
+    #[error("Error")]
+    Any {
+        listener_id: ListenerId,
+        error: anyhow::Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NatType {
+    Igd,
+    #[cfg(feature = "nat_pmp_fallback")]
+    #[cfg(not(target_os = "ios"))]
+    Natpmp,
+}
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum NatCommands {
-    ForwardPort(Multiaddr, Duration, oneshot::Sender<anyhow::Result<()>>),
-    IdgExternalAddr(oneshot::Sender<anyhow::Result<IpAddr>>),
-    #[cfg(not(target_os = "ios"))]
-    NatpmpExternalAddr(oneshot::Sender<anyhow::Result<IpAddr>>),
+    ForwardPort(ListenerId, Multiaddr),
+    DisableForwardPort(ListenerId, Multiaddr, NatType),
+}
+
+#[derive(Debug)]
+pub enum NatResult {
+    PortForwardingEnabled {
+        listener_id: ListenerId,
+        local_addr: Multiaddr,
+        addr: Multiaddr,
+        nat_type: NatType,
+        timer: futures_timer::Delay,
+    },
+    PortForwardingDisabled {
+        listener_id: ListenerId,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum QuicType {
+    Draft29,
+    V1,
+}
+
+impl From<QuicType> for Protocol<'_> {
+    fn from(qty: QuicType) -> Self {
+        match qty {
+            QuicType::Draft29 => Protocol::Quic,
+            QuicType::V1 => Protocol::QuicV1,
+        }
+    }
 }
 
 #[inline]
 #[cfg(any(feature = "tokio", feature = "async-std"))]
-pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
-    let (tx, mut rx) = unbounded();
-    #[cfg(feature = "tokio")]
-    #[cfg(not(target_os = "ios"))]
-    let nat_handle = std::sync::Arc::new(natpmp::new_tokio_natpmp().await?);
+pub fn port_forwarding_task(
+    renewal: Duration,
+    duration: Duration,
+) -> (
+    UnboundedSender<NatCommands>,
+    Receiver<Result<NatResult, ForwardingError>>,
+) {
+    use futures::{channel::mpsc::channel, SinkExt};
+    use futures_timer::Delay;
 
-    #[cfg(feature = "async-std")]
-    #[cfg(not(target_os = "ios"))]
-    let nat_handle = std::sync::Arc::new(natpmp::new_async_std_natpmp().await?);
+    use crate::utils::to_multipaddr;
+
+    let (mut res, res_rx) = channel(20);
+    let (tx, mut rx) = unbounded();
 
     let fut = async move {
         while let Some(cmd) = rx.next().await {
             match cmd {
-                NatCommands::ForwardPort(addr, duration, res) => {
-                    let Some((addr, protocol)) = multiaddr_to_socket_port(&addr) else {
-                        let _ = res.send(Err(anyhow::anyhow!("address is invalid")));
+                NatCommands::ForwardPort(id, multiaddr) => {
+                    let Some((addr, protocol, qty)) = multiaddr_to_socket_port(&multiaddr) else {
+                        let _ = res.clone().send(Err(ForwardingError::InvalidAddress{ listener_id: id, address: multiaddr })).await;
                         continue;
                     };
-                    let opts = SearchOptions {
-                        timeout: Some(Duration::from_secs(2)),
-                        ..Default::default()
+
+                    let igd_fut = async {
+                        let gateway = aio::search_gateway(SearchOptions::default()).await?;
+
+                        gateway
+                            .add_port(
+                                protocol.into(),
+                                addr.port(),
+                                addr,
+                                duration.as_secs() as _,
+                                "libp2p",
+                            )
+                            .await?;
+
+                        let ext_addr = gateway.get_external_ip().await?;
+
+                        let multiaddr = to_multipaddr((ext_addr, addr.port()), protocol, qty);
+
+                        Ok::<_, igd_next::Error>(multiaddr)
                     };
 
-                    match aio::search_gateway(opts).await {
-                        Ok(gateway) => {
-                            match gateway
-                                .add_port(
-                                    protocol.into(),
-                                    addr.port(),
+                    match igd_fut.await {
+                        Ok(addr) => {
+                            let _ = res
+                                .send(Ok(NatResult::PortForwardingEnabled {
+                                    listener_id: id,
+                                    local_addr: multiaddr,
                                     addr,
-                                    duration.as_secs() as _,
-                                    "libp2p",
-                                )
-                                .await
-                            {
-                                Ok(_) => {
-                                    let _ = res.send(Ok(()));
-                                    continue;
-                                }
-                                Err(e) => {
-                                    log::warn!("Error with igd: {e}");
-                                }
-                            };
+                                    nat_type: NatType::Igd,
+                                    timer: Delay::new(renewal),
+                                }))
+                                .await;
+                            continue;
                         }
                         Err(e) => {
-                            log::warn!("Error with igd: {e}");
+                            log::error!("Error opening port with igd: {e}");
                         }
                     };
 
-                    #[cfg(target_os = "ios")]
+                    #[cfg(any(target_os = "ios", not(feature = "nat_pmp_fallback")))]
                     {
-                        let _ = res.send(Err(anyhow::anyhow!("Unable to port forward")));
+                        let _ = res
+                            .send(Err(ForwardingError::PortForwardingFailed {
+                                listener_id: id,
+                            }))
+                            .await;
                         continue;
                     }
 
+                    #[cfg(feature = "nat_pmp_fallback")]
                     #[cfg(not(target_os = "ios"))]
                     {
+                        #[cfg(all(feature = "tokio"))]
+                        let mut nat_handle = match natpmp::new_tokio_natpmp().await {
+                            Ok(handle) => handle,
+                            Err(e) => {
+                                log::error!("Error obtaining nat-pmp handle: {e}");
+                                let _ = res
+                                    .send(Err(ForwardingError::PortForwardingFailed {
+                                        listener_id: id,
+                                    }))
+                                    .await;
+                                continue;
+                            }
+                        };
+
+                        #[cfg(all(feature = "async-std"))]
+                        let mut nat_handle = match natpmp::new_async_std_natpmp().await {
+                            Ok(handle) => handle,
+                            Err(e) => {
+                                log::error!("Error obtaining nat-pmp handle: {e}");
+                                let _ = res
+                                    .send(Err(ForwardingError::PortForwardingFailed {
+                                        listener_id: id,
+                                    }))
+                                    .await;
+                                continue;
+                            }
+                        };
+
                         // In case igd fails, we will attempt with nat-pmp before returning an error
                         // TODO: Determine if we should have it in separate events
                         if let Err(e) = nat_handle
@@ -96,77 +191,136 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
                             )
                             .await
                         {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
+                            log::error!("Error opening port with nat-pmp: {e}");
+                            let _ = res
+                                .send(Err(ForwardingError::PortForwardingFailed {
+                                    listener_id: id,
+                                }))
+                                .await;
                             continue;
                         }
-                        match nat_handle.read_response_or_retry().await {
-                            Ok(natpmp::Response::TCP(_)) | Ok(natpmp::Response::UDP(_)) => {
-                                let _ = res.send(Ok(()));
+
+                        let response = match nat_handle.read_response_or_retry().await {
+                            Ok(response) => response,
+                            Err(e) => {
+                                let _ = res
+                                    .send(Err(ForwardingError::Any {
+                                        listener_id: id,
+                                        error: anyhow::anyhow!("Error with nat pmp: {e}"),
+                                    }))
+                                    .await;
+                                continue;
                             }
+                        };
+
+                        if !matches!(
+                            response,
+                            natpmp::Response::TCP(_) | natpmp::Response::UDP(_)
+                        ) {
+                            let _ = res
+                                .send(Err(ForwardingError::Any {
+                                    listener_id: id,
+                                    error: anyhow::anyhow!("Unsupported result"),
+                                }))
+                                .await;
+                            continue;
+                        }
+
+                        if let Err(e) = nat_handle.send_public_address_request().await {
+                            let _ = res
+                                .send(Err(ForwardingError::Any {
+                                    listener_id: id,
+                                    error: anyhow::anyhow!("error sending request: {e}"),
+                                }))
+                                .await;
+                            continue;
+                        }
+
+                        let gateway = match nat_handle.read_response_or_retry().await {
+                            Ok(natpmp::Response::Gateway(gr)) => gr,
                             Ok(_) => {
-                                let _ = res.send(Err(anyhow::anyhow!("Unsupported result")));
+                                let _ = res
+                                    .send(Err(ForwardingError::Any {
+                                        listener_id: id,
+                                        error: anyhow::anyhow!("Cannot get external address"),
+                                    }))
+                                    .await;
+                                continue;
                             }
                             Err(e) => {
-                                let _ = res.send(Err(anyhow::anyhow!("Error with nat pmp: {e}")));
+                                let _ = res
+                                    .send(Err(ForwardingError::Any {
+                                        listener_id: id,
+                                        error: anyhow::anyhow!("Error with nat pmp: {e}"),
+                                    }))
+                                    .await;
+                                continue;
                             }
-                        }
+                        };
+
+                        let ext_addr = *gateway.public_address();
+                        let addr = to_multipaddr((ext_addr, addr.port()), protocol, qty);
+
+                        let _ = res
+                            .send(Ok(NatResult::PortForwardingEnabled {
+                                listener_id: id,
+                                local_addr: multiaddr,
+                                addr,
+                                nat_type: NatType::Natpmp,
+                                timer: Delay::new(renewal),
+                            }))
+                            .await;
                     }
                 }
-                NatCommands::IdgExternalAddr(res) => {
-                    let gateway = match aio::search_gateway(SearchOptions::default()).await {
-                        Ok(n) => n,
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                            continue;
-                        }
-                    };
-                    match gateway.get_external_ip().await {
-                        Ok(addr) => {
-                            let _ = res.send(Ok(addr));
-                        }
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                        }
-                    };
-                }
-                #[cfg(not(target_os = "ios"))]
-                NatCommands::NatpmpExternalAddr(res) => {
-                    //Note: Because the function contains a mutable reference, we cannot call it behind an arc. So we create
-                    //      a new instance until dep is patched upstream
-                    #[cfg(feature = "tokio")]
-                    let mut handler = match natpmp::new_tokio_natpmp().await {
-                        Ok(n) => n,
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                            continue;
-                        }
-                    };
-
-                    #[cfg(feature = "async-std")]
-                    let mut handler = match natpmp::new_async_std_natpmp().await {
-                        Ok(n) => n,
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                            continue;
-                        }
-                    };
-
-                    if let Err(e) = handler.send_public_address_request().await {
-                        let _ = res.send(Err(anyhow::Error::from(e)));
+                NatCommands::DisableForwardPort(id, addr, NatType::Igd) => {
+                    let Some((addr, protocol, _)) = multiaddr_to_socket_port(&addr) else {
+                        let _ = res.send(Err(ForwardingError::InvalidAddress{ listener_id: id, address: addr })).await;
                         continue;
-                    }
-                    match handler.read_response_or_retry().await {
-                        Ok(natpmp::Response::Gateway(gr)) => {
-                            let addr = IpAddr::V4(*gr.public_address());
-                            let _ = res.send(Ok(addr));
-                        }
-                        Ok(_) => {
-                            let _ = res.send(Err(anyhow::anyhow!("Cannot get external address")));
-                        }
+                    };
+
+                    let opts = SearchOptions {
+                        timeout: Some(Duration::from_secs(2)),
+                        ..Default::default()
+                    };
+
+                    let gateway = match aio::search_gateway(opts).await {
+                        Ok(gateway) => gateway,
                         Err(e) => {
-                            let _ = res.send(Err(anyhow::anyhow!("Error with nat pmp: {e}")));
+                            log::warn!("Error with igd: {e}");
+                            let _ = res
+                                .send(Err(ForwardingError::Any {
+                                    listener_id: id,
+                                    error: anyhow::anyhow!("{e}"),
+                                }))
+                                .await;
+                            continue;
                         }
-                    }
+                    };
+
+                    let result = gateway
+                        .remove_port(protocol.into(), addr.port())
+                        .await
+                        .map(|_| NatResult::PortForwardingDisabled { listener_id: id })
+                        .map_err(|e| ForwardingError::Any {
+                            listener_id: id,
+                            error: anyhow::anyhow!("{e}"),
+                        });
+
+                    let _ = res.send(result).await;
+                }
+
+                #[cfg(feature = "nat_pmp_fallback")]
+                #[cfg(not(target_os = "ios"))]
+                NatCommands::DisableForwardPort(id, _, NatType::Natpmp) => {
+                    //This implementation does not have a way to remove the port at this time
+                    let _ = res
+                        .send(Err(ForwardingError::Any {
+                            listener_id: id,
+                            error: anyhow::anyhow!(
+                                "cannot disable port forwarding via nat-pmp at this time"
+                            ),
+                        }))
+                        .await;
                 }
             }
         }
@@ -178,136 +332,5 @@ pub async fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommand
     #[cfg(feature = "async-std")]
     async_std::task::spawn(fut);
 
-    Ok(tx)
-}
-
-#[inline]
-#[cfg(not(any(feature = "tokio", feature = "async-std")))]
-pub fn port_forwarding_task() -> anyhow::Result<UnboundedSender<NatCommands>> {
-    let (tx, mut rx) = unbounded();
-
-    std::thread::spawn(move || {
-        #[cfg(not(target_os = "ios"))]
-        let mut nat_handle = natpmp::Natpmp::new().expect("Unable to use natpmp");
-        while let Some(cmd) = futures::executor::block_on(rx.next()) {
-            match cmd {
-                NatCommands::ForwardPort(addr, duration, res) => {
-                    let Some((addr, protocol)) = multiaddr_to_socket_port(&addr) else {
-                        let _ = res.send(Err(anyhow::anyhow!("address is invalid")));
-                        continue;
-                    };
-                    let opts = SearchOptions {
-                        timeout: Some(Duration::from_secs(2)),
-                        ..Default::default()
-                    };
-
-                    match igd_next::search_gateway(opts) {
-                        Ok(gateway) => {
-                            match gateway.add_port(
-                                protocol.into(),
-                                addr.port(),
-                                addr,
-                                duration.as_secs() as _,
-                                "libp2p",
-                            ) {
-                                Ok(_) => {
-                                    let _ = res.send(Ok(()));
-                                    continue;
-                                }
-                                Err(e) => {
-                                    log::warn!("Error with igd: {e}");
-                                }
-                            };
-                        }
-                        Err(e) => {
-                            log::warn!("Error with igd: {e}");
-                        }
-                    };
-
-                    #[cfg(target_os = "ios")]
-                    {
-                        let _ = res.send(Err(anyhow::anyhow!("Unable to port forward")));
-                        continue;
-                    }
-
-                    #[cfg(not(target_os = "ios"))]
-                    {
-                        // In case igd fails, we will attempt with nat-pmp before returning an error
-                        // TODO: Determine if we should have it in separate events
-                        if let Err(e) = nat_handle.send_port_mapping_request(
-                            protocol.into(),
-                            addr.port(),
-                            addr.port(),
-                            duration.as_secs() as _,
-                        ) {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                            continue;
-                        }
-                        std::thread::sleep(Duration::from_millis(100));
-                        match nat_handle.read_response_or_retry() {
-                            Ok(natpmp::Response::TCP(_)) | Ok(natpmp::Response::UDP(_)) => {
-                                let _ = res.send(Ok(()));
-                            }
-                            Ok(_) => {
-                                let _ = res.send(Err(anyhow::anyhow!("Unsupported result")));
-                            }
-                            Err(e) => {
-                                let _ = res.send(Err(anyhow::anyhow!("Error with nat pmp: {e}")));
-                            }
-                        }
-                    }
-                }
-                NatCommands::IdgExternalAddr(res) => {
-                    let gateway = match igd_next::search_gateway(SearchOptions::default()) {
-                        Ok(n) => n,
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                            continue;
-                        }
-                    };
-                    match gateway.get_external_ip() {
-                        Ok(addr) => {
-                            let _ = res.send(Ok(addr));
-                        }
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                        }
-                    };
-                }
-                #[cfg(not(target_os = "ios"))]
-                NatCommands::NatpmpExternalAddr(res) => {
-                    //Note: Because the function contains a mutable reference, we cannot call it behind an arc. So we create
-                    //      a new instance until dep is patched upstream
-
-                    let mut handler = match natpmp::Natpmp::new() {
-                        Ok(n) => n,
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::Error::from(e)));
-                            continue;
-                        }
-                    };
-
-                    if let Err(e) = handler.send_public_address_request() {
-                        let _ = res.send(Err(anyhow::Error::from(e)));
-                        continue;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                    match handler.read_response_or_retry() {
-                        Ok(natpmp::Response::Gateway(gr)) => {
-                            let addr = IpAddr::V4(*gr.public_address());
-                            let _ = res.send(Ok(addr));
-                        }
-                        Ok(_) => {
-                            let _ = res.send(Err(anyhow::anyhow!("Cannot get external address")));
-                        }
-                        Err(e) => {
-                            let _ = res.send(Err(anyhow::anyhow!("Error with nat pmp: {e}")));
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    Ok(tx)
+    (tx, res_rx)
 }

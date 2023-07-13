@@ -1,6 +1,6 @@
 [package]
 name = "libp2p-nat"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "(WIP) Implementation of port forwarding for libp2p"
@@ -14,9 +14,10 @@ exclude = [".gitignore"]
 default = ["tokio"]
 tokio = ["dep:tokio", "igd-next/aio_tokio", "natpmp/tokio"]
 async-std = ["dep:async-std", "igd-next/aio_async_std", "natpmp/async-std"]
+nat_pmp_fallback = ["natpmp"]
 
 [dependencies]
-libp2p = { version = "0.51" }
+libp2p = { version = "0.52" }
 futures = "0.3"
 igd-next = { version = "0.13", default-features = false }
 void = "1"
@@ -24,13 +25,15 @@ tokio = { version = "1", optional = true, features = ["full"] }
 async-std = { version = "1", optional = true }
 log = "0.4"
 anyhow = "1"
-wasm-timer = "0.2"
+futures-timer = "3.0"
+thiserror = "1"
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
-natpmp = { version = "0.4", default-features = false }
+natpmp = { version = "0.4", default-features = false, optional = true}
 
 [dev-dependencies]
-libp2p = { version = "0.51", features = ["full"] }
+libp2p = { version = "0.52", features = ["full"] }
+libp2p-quic = { version = "0.8.0-alpha", features = ["async-std"]}
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 env_logger = "0.10"
