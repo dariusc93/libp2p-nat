@@ -43,7 +43,7 @@ pub struct Behaviour {
 
 impl Default for Behaviour {
     fn default() -> Self {
-        Self::with_duration(Duration::from_secs(60))
+        Self::with_duration(Duration::from_secs(2 * 60))
     }
 }
 
@@ -291,7 +291,9 @@ impl NetworkBehaviour for Behaviour {
                         {
                             let listener = entry.get_mut();
                             log::debug!("Removing {address} from local listeners");
-                            listener.addrs.retain(|local_addr, _| local_addr != &address);
+                            listener
+                                .addrs
+                                .retain(|local_addr, _| local_addr != &address);
                             listener.renewal = Some(Delay::new(Duration::from_secs(30)));
                         }
                     }
@@ -302,8 +304,7 @@ impl NetworkBehaviour for Behaviour {
                             let listener = entry.get_mut();
                             if !listener.external_addrs.is_empty() {
                                 for addr in listener.external_addrs.drain(..) {
-                                    self.events
-                                        .push_back(ToSwarm::ExternalAddrExpired(addr));
+                                    self.events.push_back(ToSwarm::ExternalAddrExpired(addr));
                                 }
                             }
                             listener.renewal = Some(Delay::new(Duration::from_secs(30)));
