@@ -7,8 +7,12 @@ use futures::{
     StreamExt,
 };
 
-#[cfg(any(feature = "tokio", feature = "async-std"))]
-use igd_next::aio;
+#[cfg(any(feature = "tokio"))]
+use igd_next::aio::tokio as aio;
+
+#[cfg(feature = "async-std")]
+use igd_next::aio::async_std as aio;
+
 
 use igd_next::SearchOptions;
 use libp2p::{multiaddr::Protocol, swarm::derive_prelude::ListenerId, Multiaddr};
