@@ -322,7 +322,7 @@ impl NetworkBehaviour for Behaviour {
                         }
                     }
                 },
-                Poll::Ready(None) => unreachable!("Channels are owned"),
+                Poll::Ready(None) => return Poll::Pending,
                 Poll::Pending => break,
             }
         }
