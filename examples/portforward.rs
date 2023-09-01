@@ -23,7 +23,7 @@ use libp2p::{
     Multiaddr, PeerId, Transport,
 };
 
-use libp2p_quic::{async_std::Transport as AsyncQuicTransport, Config as QuicConfig};
+use libp2p::quic::{async_std::Transport as AsyncQuicTransport, Config as QuicConfig};
 
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
