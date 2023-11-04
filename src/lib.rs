@@ -7,7 +7,7 @@ use futures_timer::Delay;
 use libp2p::core::transport::ListenerId;
 use libp2p::core::{Endpoint, Multiaddr};
 use libp2p::swarm::{
-    self, dummy::ConnectionHandler as DummyConnectionHandler, NetworkBehaviour, PollParameters,
+    self, dummy::ConnectionHandler as DummyConnectionHandler, NetworkBehaviour,
 };
 use libp2p::swarm::{
     ConnectionDenied, ConnectionId, ExpiredListenAddr, NewListenAddr, THandler, THandlerInEvent,
@@ -159,7 +159,7 @@ impl NetworkBehaviour for Behaviour {
     ) {
     }
 
-    fn on_swarm_event(&mut self, event: swarm::FromSwarm<Self::ConnectionHandler>) {
+    fn on_swarm_event(&mut self, event: swarm::FromSwarm) {
         match event {
             swarm::FromSwarm::NewListenAddr(NewListenAddr { listener_id, addr }) => {
                 // Used to make sure we only obtain private ips
@@ -220,7 +220,6 @@ impl NetworkBehaviour for Behaviour {
     fn poll(
         &mut self,
         cx: &mut Context,
-        _: &mut impl PollParameters,
     ) -> Poll<swarm::ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(event);
