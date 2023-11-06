@@ -1,29 +1,17 @@
-use std::{io, str::FromStr, time::Duration};
+use std::str::FromStr;
 
 use clap::Parser;
-use futures::{future::Either, StreamExt};
+use futures::StreamExt;
 use libp2p::{
     autonat::Behaviour as Autonat,
-    core::{
-        muxing::StreamMuxerBox,
-        transport::{timeout::TransportTimeout, Boxed, OrTransport},
-        upgrade::Version,
-    },
-    dns::{DnsConfig, ResolverConfig},
     identify::{self, Behaviour as Identify, Info},
     identity::{self, Keypair},
-    kad::{store::MemoryStore, Kademlia},
-    noise::{self},
+    kad::{store::MemoryStore, Behaviour as Kademlia},
     ping::Behaviour as Ping,
-    relay::client::Transport as ClientTransport,
-    relay::client::{self, Behaviour as RelayClient},
-    swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmBuilder, SwarmEvent},
-    tcp::{async_io::Transport as AsyncTcpTransport, Config as GenTcpConfig},
-    yamux::Config as YamuxConfig,
-    Multiaddr, PeerId, Transport,
+    relay::client::Behaviour as RelayClient,
+    swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent},
+    Multiaddr, PeerId, SwarmBuilder,
 };
-
-use libp2p::quic::{async_std::Transport as AsyncQuicTransport, Config as QuicConfig};
 
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
@@ -59,26 +47,31 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Local Node: {local_peer_id}");
 
-    let (relay_transport, relay_client) = client::new(local_peer_id);
-
-    let transport = build_transport(local_keypair.clone(), relay_transport)?;
-
-    let behaviour = Behaviour {
-        autonat: Autonat::new(local_peer_id, Default::default()),
-        ping: Ping::new(Default::default()),
-        identify: Identify::new({
-            let mut config =
-                identify::Config::new("/libp2p-nat/0.1.0".to_string(), local_keypair.public());
-            config.push_listen_addr_updates = true;
-            config
-        }),
-        nat: libp2p_nat::Behaviour::default(),
-        relay_client,
-        kad: Toggle::from(None),
-        notifier: ext_behaviour::Behaviour::default(),
-    };
-
-    let mut swarm = SwarmBuilder::with_tokio_executor(transport, behaviour, local_peer_id).build();
+    let mut swarm = SwarmBuilder::with_existing_identity(local_keypair)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
+        .with_quic()
+        .with_dns()?
+        .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+        .with_behaviour(|kp, relay_client| Behaviour {
+            autonat: Autonat::new(local_peer_id, Default::default()),
+            ping: Ping::new(Default::default()),
+            identify: Identify::new({
+                let mut config =
+                    identify::Config::new("/libp2p-nat/0.1.0".to_string(), kp.public());
+                config.push_listen_addr_updates = true;
+                config
+            }),
+            nat: libp2p_nat::Behaviour::default(),
+            relay_client,
+            kad: Toggle::from(None),
+            notifier: ext_behaviour::Behaviour::default(),
+        })?
+        .build();
 
     let bootaddr = Multiaddr::from_str("/dnsaddr/bootstrap.libp2p.io")?;
     if let Some(kad) = swarm.behaviour_mut().kad.as_mut() {
@@ -139,45 +132,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn build_transport(
-    keypair: Keypair,
-    relay: ClientTransport,
-) -> io::Result<Boxed<(PeerId, StreamMuxerBox)>> {
-    let noise_config = noise::Config::new(&keypair).unwrap();
-
-    let multiplex_upgrade = YamuxConfig::default();
-
-    let quic_transport = AsyncQuicTransport::new(QuicConfig::new(&keypair));
-
-    let transport = AsyncTcpTransport::new(GenTcpConfig::default().nodelay(true).port_reuse(true));
-
-    let transport_timeout = TransportTimeout::new(transport, Duration::from_secs(30));
-
-    let transport = futures::executor::block_on(DnsConfig::custom(
-        transport_timeout,
-        ResolverConfig::cloudflare(),
-        Default::default(),
-    ))?;
-
-    let transport = OrTransport::new(relay, transport)
-        .upgrade(Version::V1)
-        .authenticate(noise_config)
-        .multiplex(multiplex_upgrade)
-        .timeout(Duration::from_secs(30))
-        .map(|(peer_id, muxer), _| (peer_id, StreamMuxerBox::new(muxer)))
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
-        .boxed();
-
-    let transport = OrTransport::new(quic_transport, transport)
-        .map(|either_output, _| match either_output {
-            Either::Left((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-            Either::Right((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-        })
-        .boxed();
-
-    Ok(transport)
-}
-
 fn generate_ed25519(secret_key_seed: u8) -> identity::Keypair {
     let mut bytes = [0u8; 32];
     bytes[0] = secret_key_seed;
@@ -197,8 +151,8 @@ mod ext_behaviour {
         swarm::{
             derive_prelude::{ExternalAddrConfirmed, ListenerId},
             dummy, ConnectionDenied, ConnectionId, ExpiredListenAddr, ExternalAddrExpired,
-            FromSwarm, ListenerClosed, NetworkBehaviour, NewListenAddr, PollParameters, THandler,
-            THandlerInEvent, THandlerOutEvent, ToSwarm,
+            FromSwarm, ListenerClosed, NetworkBehaviour, NewListenAddr, THandler, THandlerInEvent,
+            THandlerOutEvent, ToSwarm,
         },
         Multiaddr, PeerId,
     };
@@ -262,7 +216,7 @@ mod ext_behaviour {
         ) {
         }
 
-        fn on_swarm_event(&mut self, event: FromSwarm<Self::ConnectionHandler>) {
+        fn on_swarm_event(&mut self, event: FromSwarm) {
             match event {
                 FromSwarm::NewListenAddr(NewListenAddr { addr, listener_id }) => {
                     match self.listener.entry(listener_id) {
@@ -313,11 +267,7 @@ mod ext_behaviour {
             }
         }
 
-        fn poll(
-            &mut self,
-            _: &mut Context,
-            _: &mut impl PollParameters,
-        ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        fn poll(&mut self, _: &mut Context) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
             if let Some(event) = self.events.pop_front() {
                 return Poll::Ready(event);
             }
