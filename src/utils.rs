@@ -56,29 +56,25 @@ pub(crate) fn multiaddr_to_socket_port(
     addr: &Multiaddr,
 ) -> Option<(SocketAddr, MappingProtocol, Option<QuicType>)> {
     let mut iter = addr.iter();
-    let Some(mut addr) = iter
-        .next()
-        .and_then(|proto| match proto {
-            Protocol::Ip4(addr) if addr.is_private() => {
-                Some(SocketAddr::V4(SocketAddrV4::new(addr, 0)))
-            }
-            // Protocol::Ip6(addr)
-            //     if !addr.is_loopback()
-            //         && (addr.segments()[0] & 0xffc0) != 0xfe80
-            //         && (addr.segments()[0] & 0xfe00) != 0xfc00 =>
-            // {
-            //     Some(SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)))
-            // }
-            _ => None,
-        }) else { return None };
+    let mut addr = iter.next().and_then(|proto| match proto {
+        Protocol::Ip4(addr) if addr.is_private() => {
+            Some(SocketAddr::V4(SocketAddrV4::new(addr, 0)))
+        }
+        // Protocol::Ip6(addr)
+        //     if !addr.is_loopback()
+        //         && (addr.segments()[0] & 0xffc0) != 0xfe80
+        //         && (addr.segments()[0] & 0xfe00) != 0xfc00 =>
+        // {
+        //     Some(SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)))
+        // }
+        _ => None,
+    })?;
 
-    let Some((protocol, port)) = iter
-        .next()
-        .and_then(|proto| match proto {
-            Protocol::Tcp(port) => Some((MappingProtocol::TCP, port)),
-            Protocol::Udp(port) => Some((MappingProtocol::UDP, port)),
-            _ => None,
-        }) else { return None; };
+    let (protocol, port) = iter.next().and_then(|proto| match proto {
+        Protocol::Tcp(port) => Some((MappingProtocol::TCP, port)),
+        Protocol::Udp(port) => Some((MappingProtocol::UDP, port)),
+        _ => None,
+    })?;
 
     let quic_type = iter.next().and_then(|proto| match proto {
         Protocol::Quic => Some(QuicType::Draft29),

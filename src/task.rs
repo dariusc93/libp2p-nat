@@ -7,7 +7,7 @@ use futures::{
     StreamExt,
 };
 
-#[cfg(any(feature = "tokio"))]
+#[cfg(feature = "tokio")]
 use igd_next::aio::tokio as aio;
 
 #[cfg(feature = "async-std")]
@@ -156,7 +156,7 @@ pub fn port_forwarding_task(
                     #[cfg(feature = "nat_pmp_fallback")]
                     #[cfg(not(target_os = "ios"))]
                     {
-                        #[cfg(all(feature = "tokio"))]
+                        #[cfg(feature = "tokio")]
                         let mut nat_handle = match natpmp::new_tokio_natpmp().await {
                             Ok(handle) => handle,
                             Err(e) => {
@@ -170,7 +170,7 @@ pub fn port_forwarding_task(
                             }
                         };
 
-                        #[cfg(all(feature = "async-std"))]
+                        #[cfg(feature = "async-std")]
                         let mut nat_handle = match natpmp::new_async_std_natpmp().await {
                             Ok(handle) => handle,
                             Err(e) => {

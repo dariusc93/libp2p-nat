@@ -17,7 +17,7 @@ async-std = ["dep:async-std", "igd-next/aio_async_std", "natpmp/async-std"]
 nat_pmp_fallback = ["natpmp"]
 
 [dependencies]
-libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "32c945ccc05ac60f2daf305b21d78f4534e5500f" }
+libp2p = { version = "0.53" }
 futures = "0.3"
 igd-next = { version = "0.14", default-features = false }
 void = "1"
@@ -32,7 +32,7 @@ thiserror = "1"
 natpmp = { version = "0.4", default-features = false, optional = true}
 
 [dev-dependencies]
-libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "32c945ccc05ac60f2daf305b21d78f4534e5500f", features = ["full"] }
+libp2p = { version = "0.53", features = ["full"] }
 clap = { version = "4.3", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 env_logger = "0.10"
